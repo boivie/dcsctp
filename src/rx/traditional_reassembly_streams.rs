@@ -211,13 +211,11 @@ impl ReassemblyStream for UnorderedStream {
         _: Option<&SkippedStream>,
         _: &mut dyn FnMut(Message),
     ) -> usize {
-        let removed_bytes = self
-            .chunks
-            .range(..new_cumulative_ack + 1)
-            .fold(0, |acc, (_, data)| acc + data.payload.len());
+        let tsn_to_keep_from = new_cumulative_ack + 1;
+        let chunks_to_keep = self.chunks.split_off(&tsn_to_keep_from);
+        let removed_chunks = std::mem::replace(&mut self.chunks, chunks_to_keep);
 
-        self.chunks.retain(|tsn, _| *tsn > new_cumulative_ack);
-        removed_bytes
+        removed_chunks.values().map(|data| data.payload.len()).sum()
     }
 
     fn reset(&mut self) {
@@ -304,16 +302,17 @@ impl ReassemblyStream for OrderedStream {
     ) -> usize {
         match skipped_stream {
             Some(SkippedStream::ForwardTsn(_, ssn)) => {
-                let mut removed_bytes: usize = 0;
-                self.chunks_by_ssn.retain(|cur_ssn, chunks| {
-                    if cur_ssn <= ssn {
-                        removed_bytes +=
-                            chunks.iter().fold(0, |acc, (_, data)| acc + data.payload.len());
-                        false
-                    } else {
-                        true
-                    }
-                });
+                let ssn_to_keep_from = *ssn + 1;
+                let chunks_to_keep = self.chunks_by_ssn.split_off(&ssn_to_keep_from);
+                let removed_chunks_by_ssn =
+                    std::mem::replace(&mut self.chunks_by_ssn, chunks_to_keep);
+
+                let mut removed_bytes: usize = removed_chunks_by_ssn
+                    .values()
+                    .flat_map(|chunks| chunks.values())
+                    .map(|data| data.payload.len())
+                    .sum();
+
                 if *ssn >= self.next_ssn {
                     self.next_ssn = *ssn + 1;
                 }

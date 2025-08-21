@@ -8,6 +8,10 @@ and this project adheres to
 
 ## Unreleased
 
+### Changed
+
+Optimizations
+
 ## 0.1.1 - 2025-08-21
 
 ### Added

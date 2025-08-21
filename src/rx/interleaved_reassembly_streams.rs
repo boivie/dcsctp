@@ -121,15 +121,16 @@ impl ReassemblyStreams for InterleavedReassemblyStreams {
             if let SkippedStream::IForwardTsn(stream_key, mid) = skipped_stream {
                 let stream = self.get_or_create(*stream_key);
 
-                stream.chunks_by_mid.retain(|cur_mid, chunks| {
-                    if cur_mid <= mid {
-                        released_bytes +=
-                            chunks.iter().fold(0, |acc, (_, data)| acc + data.payload.len());
-                        false
-                    } else {
-                        true
-                    }
-                });
+                let mid_to_keep_from = *mid + 1;
+                let chunks_to_keep = stream.chunks_by_mid.split_off(&mid_to_keep_from);
+                let removed_chunks_by_mid =
+                    std::mem::replace(&mut stream.chunks_by_mid, chunks_to_keep);
+
+                released_bytes += removed_chunks_by_mid
+                    .values()
+                    .flat_map(|chunks| chunks.values())
+                    .map(|data| data.payload.len())
+                    .sum::<usize>();
                 stream.next_mid = stream.next_mid.max(*mid + 1);
                 released_bytes += stream.try_to_assemble_messages(stream.next_mid, on_reassembled);
             }
