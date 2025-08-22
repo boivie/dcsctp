@@ -735,7 +735,7 @@ mod tests {
     use crate::api::PpId;
     use crate::api::SendOptions;
     use crate::events::Events;
-    use crate::packet::forward_tsn_chunk::SkippedStream;
+    use crate::packet::SkippedStream;
     use crate::packet::sack_chunk::GapAckBlock;
     use crate::tx::send_queue::SendQueue;
     use crate::types::Mid;

@@ -17,7 +17,7 @@ use crate::api::StreamId;
 use crate::math::round_up_to_4;
 use crate::packet::data::Data;
 use crate::packet::forward_tsn_chunk::ForwardTsnChunk;
-use crate::packet::forward_tsn_chunk::SkippedStream;
+use crate::packet::SkippedStream;
 use crate::packet::iforward_tsn_chunk::IForwardTsnChunk;
 use crate::packet::sack_chunk::GapAckBlock;
 use crate::types::Mid;
