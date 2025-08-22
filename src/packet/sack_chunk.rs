@@ -95,20 +95,22 @@ impl TryFrom<RawChunk<'_>> for SackChunk {
             ChunkParseError::InvalidLength
         );
 
-        let mut gap_ack_blocks = Vec::<GapAckBlock>::with_capacity(nbr_of_gap_blocks);
-        let mut offset = 12;
-        for _ in 0..nbr_of_gap_blocks {
-            let start = read_u16_be!(&raw.value[offset..offset + 2]);
-            let end = read_u16_be!(&raw.value[offset + 2..offset + 4]);
-            gap_ack_blocks.push(GapAckBlock { start, end });
-            offset += 4;
-        }
+        let (gap_ack_block_data, rest) = raw.value[12..].split_at(nbr_of_gap_blocks * 4);
 
-        let mut duplicate_tsns = Vec::<Tsn>::with_capacity(nbr_of_dup_tsns);
-        for _ in 0..nbr_of_dup_tsns {
-            duplicate_tsns.push(Tsn(read_u32_be!(&raw.value[offset..offset + 4])));
-            offset += 4;
-        }
+        let gap_ack_blocks = gap_ack_block_data
+            .chunks_exact(4)
+            .map(|c| {
+                let start = read_u16_be!(&c[0..2]);
+                let end = read_u16_be!(&c[2..4]);
+                GapAckBlock { start, end }
+            })
+            .collect();
+
+        let (duplicate_tsns_data, _) = rest.split_at(nbr_of_dup_tsns * 4);
+        let duplicate_tsns = duplicate_tsns_data
+            .chunks_exact(4)
+            .map(|c| Tsn(read_u32_be!(c)))
+            .collect();
 
         Ok(Self { cumulative_tsn_ack, a_rwnd, gap_ack_blocks, duplicate_tsns })
     }
