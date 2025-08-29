@@ -204,3 +204,8 @@ mod tests {
         assert!(!is_divisible_by_4!(10000000001_u64));
     }
 }
+
+/// Returns the version of this crate.
+pub fn version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
