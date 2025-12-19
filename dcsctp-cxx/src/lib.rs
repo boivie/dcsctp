@@ -13,13 +13,35 @@
 // limitations under the License.
 
 use dcsctp::api::DcSctpSocket as DcSctpSocketTrait;
+use dcsctp::api::Message as DcSctpMessage;
 use dcsctp::api::Options;
+use dcsctp::api::PpId as DcSctpPpId;
+use dcsctp::api::SendOptions;
+use dcsctp::api::SendStatus as DcSctpSendStatus;
 use dcsctp::api::SocketEvent as DcSctpSocketEvent;
 use dcsctp::api::SocketState as DcSctpSocketState;
+use dcsctp::api::StreamId as DcSctpStreamId;
 use std::time::Instant;
+
+const MAX_LIFETIME_MS: u64 = 3600 * 1000;
 
 #[cxx::bridge(namespace = "dcsctp_cxx")]
 mod ffi {
+    #[derive(Debug, Default)]
+    struct Message {
+        stream_id: u16,
+        ppid: u32,
+        payload: Vec<u8>,
+    }
+
+    #[derive(Debug)]
+    struct SendOptions {
+        unordered: bool,
+        lifetime_ms: u64,
+        max_retransmissions: u16,
+        lifecycle_id: u64,
+    }
+
     #[derive(Debug)]
     enum SocketState {
         Closed,
@@ -41,6 +63,15 @@ mod ffi {
         packet: Vec<u8>,
     }
 
+    #[derive(Debug, PartialEq)]
+    enum SendStatus {
+        Success,
+        ErrorMessageEmpty,
+        ErrorMessageTooLarge,
+        ErrorResourceExhaustion,
+        ErrorShuttingDown,
+    }
+
     extern "Rust" {
         type DcSctpSocket;
 
@@ -51,6 +82,17 @@ mod ffi {
         fn connect(socket: &mut DcSctpSocket);
         fn handle_input(socket: &mut DcSctpSocket, data: &[u8]);
         fn poll_event(socket: &mut DcSctpSocket) -> Event;
+
+        fn message_ready_count(socket: &DcSctpSocket) -> usize;
+        fn get_next_message(socket: &mut DcSctpSocket) -> Message;
+        fn new_send_options() -> SendOptions;
+        fn send(
+            socket: &mut DcSctpSocket,
+            stream_id: u16,
+            ppid: u32,
+            payload: &[u8],
+            options: &SendOptions,
+        ) -> SendStatus;
     }
 }
 
@@ -102,5 +144,58 @@ fn poll_event(socket: &mut DcSctpSocket) -> ffi::Event {
         }
         Some(_) => ffi::Event { event_type: ffi::EventType::Other, packet: Vec::new() },
         None => ffi::Event { event_type: ffi::EventType::Nothing, packet: Vec::new() },
+    }
+}
+
+fn message_ready_count(socket: &DcSctpSocket) -> usize {
+    socket.0.messages_ready_count()
+}
+
+fn get_next_message(socket: &mut DcSctpSocket) -> ffi::Message {
+    match socket.0.get_next_message() {
+        Some(msg) => {
+            ffi::Message { stream_id: msg.stream_id.0, ppid: msg.ppid.0, payload: msg.payload }
+        }
+        None => ffi::Message::default(),
+    }
+}
+
+fn new_send_options() -> ffi::SendOptions {
+    ffi::SendOptions {
+        unordered: false,
+        lifetime_ms: MAX_LIFETIME_MS,
+        max_retransmissions: u16::MAX,
+        lifecycle_id: 0,
+    }
+}
+
+fn send(
+    socket: &mut DcSctpSocket,
+    stream_id: u16,
+    ppid: u32,
+    payload: &[u8],
+    options: &ffi::SendOptions,
+) -> ffi::SendStatus {
+    let msg = DcSctpMessage::new(DcSctpStreamId(stream_id), DcSctpPpId(ppid), payload.to_vec());
+    let rust_options = SendOptions {
+        unordered: options.unordered,
+        lifetime: if options.lifetime_ms < MAX_LIFETIME_MS {
+            Some(std::time::Duration::from_millis(options.lifetime_ms))
+        } else {
+            None
+        },
+        max_retransmissions: if options.max_retransmissions != u16::MAX {
+            Some(options.max_retransmissions)
+        } else {
+            None
+        },
+        lifecycle_id: dcsctp::api::LifecycleId::new(options.lifecycle_id),
+    };
+    match socket.0.send(msg, &rust_options) {
+        DcSctpSendStatus::Success => ffi::SendStatus::Success,
+        DcSctpSendStatus::ErrorMessageEmpty => ffi::SendStatus::ErrorMessageEmpty,
+        DcSctpSendStatus::ErrorMessageTooLarge => ffi::SendStatus::ErrorMessageTooLarge,
+        DcSctpSendStatus::ErrorResourceExhaustion => ffi::SendStatus::ErrorResourceExhaustion,
+        DcSctpSendStatus::ErrorShuttingDown => ffi::SendStatus::ErrorShuttingDown,
     }
 }
