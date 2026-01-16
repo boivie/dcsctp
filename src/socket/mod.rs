@@ -116,6 +116,9 @@ pub mod transmission_control_block;
 #[cfg(test)]
 pub mod socket_tests;
 
+#[cfg(test)]
+mod cookie_resolution_tests;
+
 const MIN_VERIFICATION_TAG: u32 = 1;
 const MAX_VERIFICATION_TAG: u32 = u32::MAX;
 const MIN_INITIAL_TSN: u32 = u32::MIN;
