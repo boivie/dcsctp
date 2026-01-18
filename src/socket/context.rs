@@ -6,8 +6,8 @@ use crate::api::SocketTime;
 use crate::packet::chunk::Chunk;
 use crate::packet::sctp_packet::SctpPacketBuilder;
 use crate::socket::state::State;
+use crate::socket::metrics::SocketMetrics;
 use crate::socket::transmission_control_block::CurrentResetRequest;
-use crate::socket::util::TxErrorCounter;
 use crate::timer::Timer;
 use crate::tx::send_queue::SendQueue;
 use std::cmp::min;
@@ -16,23 +16,20 @@ use crate::api::ErrorKind;
 use std::rc::Rc;
 use std::cell::RefCell;
 
-pub(crate) struct Context<'a, 'sq> {
+pub(crate) struct Context<'a> {
     pub options: &'a Options,
     pub events: &'a Rc<RefCell<dyn EventSink>>,
-    pub send_queue: &'a mut SendQueue<'sq>,
+    pub send_queue: &'a mut SendQueue,
     pub limit_forward_tsn_until: &'a mut SocketTime,
     pub heartbeat_interval: &'a mut Timer,
     pub heartbeat_timeout: &'a mut Timer,
     pub heartbeat_counter: &'a mut u32,
     pub heartbeat_sent_time: &'a mut SocketTime,
-    pub rx_packets_count: &'a mut usize,
-    pub tx_packets_count: &'a mut usize,
-    pub tx_messages_count: &'a mut usize,
+    pub metrics: &'a mut SocketMetrics,
     pub peer_implementation: &'a mut SctpImplementation,
-    pub tx_error_counter: &'a mut TxErrorCounter,
 }
 
-impl<'a, 'sq> Context<'a, 'sq> {
+impl<'a> Context<'a> {
     pub(crate) fn send_buffered_packets(&mut self, state: &mut State, now: SocketTime) {
         if let Some(tcb) = state.tcb_mut() {
             let mut packet = tcb.new_packet();
@@ -108,7 +105,7 @@ impl<'a, 'sq> Context<'a, 'sq> {
                 break;
             }
             self.events.borrow_mut().add(SocketEvent::SendPacket(builder.build()));
-            *self.tx_packets_count += 1;
+            self.metrics.tx_packets_count += 1;
 
             // From <https://datatracker.ietf.org/doc/html/rfc9260#section-5.1-2.3.2>:
             //

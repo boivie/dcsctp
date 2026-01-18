@@ -59,11 +59,13 @@ pub mod transmission_control_block;
 
 pub(crate) mod context;
 pub(crate) mod handlers;
+pub(crate) mod metrics;
 pub(crate) mod state;
 pub(crate) mod util;
 
 use context::Context;
 use handlers::{data, handshake, heartbeat, reconfig, shutdown, error as error_handler};
+use metrics::SocketMetrics;
 use state::{CookieWaitState, State};
 use util::{closest_timeout, LoggingEvents, TxErrorCounter};
 
@@ -84,13 +86,13 @@ const MAX_INITIAL_TSN: u32 = u32::MAX;
 /// receive messages, and to manage the connection.
 ///
 /// To create a socket, use the [`Socket::new`] method.
-pub struct Socket<'a> {
+pub struct Socket {
     name: String,
     now: Rc<RefCell<SocketTime>>,
     options: Options,
     state: State,
     events: Rc<RefCell<dyn EventSink>>,
-    send_queue: SendQueue<'a>,
+    send_queue: SendQueue,
 
     limit_forward_tsn_until: SocketTime,
 
@@ -99,15 +101,11 @@ pub struct Socket<'a> {
     heartbeat_counter: u32,
     heartbeat_sent_time: SocketTime,
 
-    rx_packets_count: usize,
-    tx_packets_count: usize,
-    tx_messages_count: usize,
+    metrics: SocketMetrics,
     peer_implementation: SctpImplementation,
-
-    tx_error_counter: TxErrorCounter,
 }
 
-impl<'a> Socket<'a> {
+impl Socket {
     /// Creates a new `Socket`.
     ///
     /// The provided `name` is only used for logging to identify this socket, and `start_time`
@@ -140,15 +138,17 @@ impl<'a> Socket<'a> {
             ),
             heartbeat_counter: 0,
             heartbeat_sent_time: SocketTime::zero(),
-            rx_packets_count: 0,
-            tx_packets_count: 0,
-            tx_messages_count: 0,
+            metrics: SocketMetrics {
+                rx_packets_count: 0,
+                tx_packets_count: 0,
+                tx_messages_count: 0,
+                tx_error_counter: TxErrorCounter::new(options.max_retransmissions),
+            },
             peer_implementation: SctpImplementation::Unknown,
-            tx_error_counter: TxErrorCounter::new(options.max_retransmissions),
         }
     }
     
-    fn create_context<'b>(&'b mut self) -> (Context<'b, 'a>, &'b mut State) {
+    fn create_context<'b>(&'b mut self) -> (Context<'b>, &'b mut State) {
         (
             Context {
                 options: &self.options,
@@ -159,11 +159,8 @@ impl<'a> Socket<'a> {
                 heartbeat_timeout: &mut self.heartbeat_timeout,
                 heartbeat_counter: &mut self.heartbeat_counter,
                 heartbeat_sent_time: &mut self.heartbeat_sent_time,
-                rx_packets_count: &mut self.rx_packets_count,
-                tx_packets_count: &mut self.tx_packets_count,
-                tx_messages_count: &mut self.tx_messages_count,
+                metrics: &mut self.metrics,
                 peer_implementation: &mut self.peer_implementation,
-                tx_error_counter: &mut self.tx_error_counter,
             },
             &mut self.state,
         )
@@ -217,7 +214,7 @@ impl<'a> Socket<'a> {
     }
 }
 
-impl DcSctpSocket for Socket<'_> {
+impl DcSctpSocket for Socket {
     fn poll_event(&mut self) -> Option<SocketEvent> {
         self.events.borrow_mut().next_event()
     }
@@ -249,7 +246,7 @@ impl DcSctpSocket for Socket<'_> {
     }
 
     fn handle_input(&mut self, packet: &[u8]) {
-        self.rx_packets_count += 1;
+        self.metrics.rx_packets_count += 1;
         let now = *self.now.borrow();
         log_packet(&self.name, now.into(), false, packet);
 
@@ -317,7 +314,7 @@ impl DcSctpSocket for Socket<'_> {
         if let Some(tcb) = state.tcb_mut() {
             tcb.data_tracker.handle_timeout(now);
             if tcb.retransmission_queue.handle_timeout(now) {
-                ctx.tx_error_counter.increment();
+                ctx.metrics.tx_error_counter.increment();
             }
         }
         
@@ -342,7 +339,7 @@ impl DcSctpSocket for Socket<'_> {
             }
         }
         if let Some(tcb) = state.tcb_mut() {
-            if ctx.tx_error_counter.is_exhausted() {
+            if ctx.metrics.tx_error_counter.is_exhausted() {
                 // We need to send ABORT.
                 // This logic was in advance_time.
                 // I should extract it or handle it here using context.
@@ -361,7 +358,7 @@ impl DcSctpSocket for Socket<'_> {
                         }))
                         .build(),
                 ));
-                *ctx.tx_packets_count += 1;
+                ctx.metrics.tx_packets_count += 1;
                 // internal_close requires context.
                 ctx.internal_close(state, ErrorKind::TooManyRetries, "Too many retransmissions".into());
                 return;
@@ -488,7 +485,7 @@ impl DcSctpSocket for Socket<'_> {
                         }))
                         .build(),
                 ));
-                *ctx.tx_packets_count += 1;
+                ctx.metrics.tx_packets_count += 1;
             }
             ctx.internal_close(state, ErrorKind::NoError, String::new());
         }
@@ -536,7 +533,7 @@ impl DcSctpSocket for Socket<'_> {
         }
 
         let now = *self.now.borrow();
-        self.tx_messages_count += 1;
+        self.metrics.tx_messages_count += 1;
         self.send_queue.add(now, message, send_options);
         
         let (mut ctx, state) = self.create_context();
@@ -551,7 +548,7 @@ impl DcSctpSocket for Socket<'_> {
             .map(|message| {
                 let status = self.validate_send(&message, send_options);
                 if status == SendStatus::Success {
-                    self.tx_messages_count += 1;
+                    self.metrics.tx_messages_count += 1;
                     self.send_queue.add(now, message, send_options);
                 }
                 status
@@ -600,15 +597,15 @@ impl DcSctpSocket for Socket<'_> {
         let packet_payload_size =
             self.options.mtu - sctp_packet::COMMON_HEADER_SIZE - data_chunk::HEADER_SIZE;
         Some(Metrics {
-            tx_packets_count: self.tx_packets_count,
-            tx_messages_count: self.tx_messages_count,
+            tx_packets_count: self.metrics.tx_packets_count,
+            tx_messages_count: self.metrics.tx_messages_count,
             rtx_packets_count: tcb.retransmission_queue.rtx_packets_count(),
             rtx_bytes_count: tcb.retransmission_queue.rtx_bytes_count(),
             cwnd_bytes: tcb.retransmission_queue.cwnd(),
             srtt: tcb.rto.srtt(),
             unack_data_count: tcb.retransmission_queue.unacked_items()
                 + self.send_queue.total_buffered_amount().div_ceil(packet_payload_size),
-            rx_packets_count: self.rx_packets_count,
+            rx_packets_count: self.metrics.rx_packets_count,
             rx_messages_count: tcb.reassembly_queue.rx_messages_count(),
             peer_rwnd_bytes: tcb.retransmission_queue.rwnd() as u32,
             peer_implementation: self.peer_implementation,

@@ -10,7 +10,7 @@ use crate::packet::SerializableTlv;
 use crate::socket::context::Context;
 use crate::socket::state::State;
 
-pub(crate) fn handle_abort(state: &mut State, ctx: &mut Context<'_, '_>, chunk: AbortChunk) {
+pub(crate) fn handle_abort(state: &mut State, ctx: &mut Context<'_>, chunk: AbortChunk) {
     if state.tcb().is_none() {
         // From <https://datatracker.ietf.org/doc/html/rfc9260#section-3.3.7>:
         //
@@ -23,7 +23,7 @@ pub(crate) fn handle_abort(state: &mut State, ctx: &mut Context<'_, '_>, chunk: 
     ctx.internal_close(state, ErrorKind::PeerReported, reason);
 }
 
-pub(crate) fn handle_error(state: &mut State, ctx: &mut Context<'_, '_>, chunk: ErrorChunk) {
+pub(crate) fn handle_error(state: &mut State, ctx: &mut Context<'_>, chunk: ErrorChunk) {
     if state.tcb().is_none() {
         return;
     }
@@ -32,7 +32,7 @@ pub(crate) fn handle_error(state: &mut State, ctx: &mut Context<'_, '_>, chunk: 
     ctx.events.borrow_mut().add(SocketEvent::OnError(ErrorKind::PeerReported, message));
 }
 
-pub(crate) fn handle_unrecognized_chunk(state: &mut State, ctx: &mut Context<'_, '_>, chunk: UnknownChunk) -> bool {
+pub(crate) fn handle_unrecognized_chunk(state: &mut State, ctx: &mut Context<'_>, chunk: UnknownChunk) -> bool {
     // From <https://datatracker.ietf.org/doc/html/rfc9260#section-3.2-3.2.5>:
     //
     //   Chunk Types are encoded such that the highest-order 2 bits specify the action that is
@@ -60,7 +60,7 @@ pub(crate) fn handle_unrecognized_chunk(state: &mut State, ctx: &mut Context<'_,
                     }))
                     .build(),
             ));
-            *ctx.tx_packets_count += 1;
+            ctx.metrics.tx_packets_count += 1;
         }
     }
     continue_processing

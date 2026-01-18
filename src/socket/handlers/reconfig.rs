@@ -12,7 +12,7 @@ use crate::socket::state::State;
 use crate::socket::transmission_control_block::CurrentResetRequest;
 use crate::socket::transmission_control_block::InflightResetRequest;
 
-pub(crate) fn handle_reconfig(state: &mut State, ctx: &mut Context<'_, '_>, now: SocketTime, chunk: ReConfigChunk) {
+pub(crate) fn handle_reconfig(state: &mut State, ctx: &mut Context<'_>, now: SocketTime, chunk: ReConfigChunk) {
     let Some(tcb) = state.tcb_mut() else {
         return;
     };
@@ -151,7 +151,7 @@ pub(crate) fn handle_reconfig(state: &mut State, ctx: &mut Context<'_, '_>, now:
                 .add(&Chunk::ReConfig(ReConfigChunk { parameters: responses }))
                 .build(),
         ));
-        *ctx.tx_packets_count += 1;
+        ctx.metrics.tx_packets_count += 1;
     }
 
     // Note: Handling this response may result in outgoing stream resets finishing (either
@@ -161,7 +161,7 @@ pub(crate) fn handle_reconfig(state: &mut State, ctx: &mut Context<'_, '_>, now:
     ctx.send_buffered_packets(state, now);
 }
 
-pub(crate) fn handle_reconfig_timeout(state: &mut State, ctx: &mut Context<'_, '_>, now: SocketTime) {
+pub(crate) fn handle_reconfig_timeout(state: &mut State, ctx: &mut Context<'_>, now: SocketTime) {
     let tcb = state.tcb_mut().unwrap();
     if tcb.reconfig_timer.expire(now) {
         match tcb.current_reset_request {
@@ -174,8 +174,8 @@ pub(crate) fn handle_reconfig_timeout(state: &mut State, ctx: &mut Context<'_, '
             CurrentResetRequest::Inflight(..) => {
                 // There is an outstanding request, which timed out while waiting for a
                 // response.
-                ctx.tx_error_counter.increment();
-                if ctx.tx_error_counter.is_exhausted() {
+                ctx.metrics.tx_error_counter.increment();
+                if ctx.metrics.tx_error_counter.is_exhausted() {
                     return;
                 }
             }
@@ -184,7 +184,7 @@ pub(crate) fn handle_reconfig_timeout(state: &mut State, ctx: &mut Context<'_, '
         let mut builder = tcb.new_packet();
         tcb.add_prepared_ssn_reset_request(&mut builder);
         ctx.events.borrow_mut().add(SocketEvent::SendPacket(builder.build()));
-        *ctx.tx_packets_count += 1;
+        ctx.metrics.tx_packets_count += 1;
     }
 }
 

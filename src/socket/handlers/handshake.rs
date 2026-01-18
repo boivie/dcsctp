@@ -41,7 +41,7 @@ pub(crate) const MAX_VERIFICATION_TAG: u32 = u32::MAX;
 pub(crate) const MIN_INITIAL_TSN: u32 = u32::MIN;
 pub(crate) const MAX_INITIAL_TSN: u32 = u32::MAX;
 
-pub(crate) fn handle_init(state: &mut State, ctx: &mut Context<'_, '_>, chunk: InitChunk) {
+pub(crate) fn handle_init(state: &mut State, ctx: &mut Context<'_>, chunk: InitChunk) {
     let my_verification_tag: u32;
     let my_initial_tsn: Tsn;
     let tie_tag: u64;
@@ -137,10 +137,10 @@ pub(crate) fn handle_init(state: &mut State, ctx: &mut Context<'_, '_>, chunk: I
         .add(&Chunk::InitAck(init_ack))
         .build(),
     ));
-    *ctx.tx_packets_count += 1;
+    ctx.metrics.tx_packets_count += 1;
 }
 
-pub(crate) fn handle_init_ack(state: &mut State, ctx: &mut Context<'_, '_>, now: SocketTime, chunk: InitAckChunk) {
+pub(crate) fn handle_init_ack(state: &mut State, ctx: &mut Context<'_>, now: SocketTime, chunk: InitAckChunk) {
     let State::CookieWait(s) = state else {
         // From <https://datatracker.ietf.org/doc/html/rfc9260#section-5.2.3>:
         //
@@ -177,7 +177,7 @@ pub(crate) fn handle_init_ack(state: &mut State, ctx: &mut Context<'_, '_>, now:
             }))
             .build(),
         ));
-        *ctx.tx_packets_count += 1;
+        ctx.metrics.tx_packets_count += 1;
         ctx.internal_close(
             state,
             ErrorKind::ProtocolViolation,
@@ -219,7 +219,7 @@ pub(crate) fn handle_init_ack(state: &mut State, ctx: &mut Context<'_, '_>, now:
     send_cookie_echo(state, ctx, now);
 }
 
-pub(crate) fn send_cookie_echo(state: &mut State, ctx: &mut Context<'_, '_>, now: SocketTime) {
+pub(crate) fn send_cookie_echo(state: &mut State, ctx: &mut Context<'_>, now: SocketTime) {
     let &mut State::CookieEchoed(ref s) = state else {
         unreachable!();
     };
@@ -241,7 +241,7 @@ pub(crate) fn send_cookie_echo(state: &mut State, ctx: &mut Context<'_, '_>, now
 
 pub(crate) fn handle_cookie_echo(
     state: &mut State,
-    ctx: &mut Context<'_, '_>,
+    ctx: &mut Context<'_>,
     now: SocketTime,
     header: &CommonHeader,
     chunk: CookieEchoChunk,
@@ -292,7 +292,7 @@ pub(crate) fn handle_cookie_echo(
                     ErrorKind::WrongSequence,
                     "Received COOKIE-ECHO while shutting down".into(),
                 ));
-                *ctx.tx_packets_count += 1;
+                ctx.metrics.tx_packets_count += 1;
                 return;
             }
             ctx.events.borrow_mut().add(SocketEvent::OnConnectionRestarted());
@@ -336,7 +336,7 @@ pub(crate) fn handle_cookie_echo(
 /// If `reset_queue` is true, reset message identifiers (used for restarts).
 fn establish_new_tcb(
     state: &mut State,
-    ctx: &mut Context<'_, '_>,
+    ctx: &mut Context<'_>,
     now: SocketTime,
     cookie: &StateCookie,
     reset_queue: bool,
@@ -367,7 +367,7 @@ fn establish_new_tcb(
     ctx.events.borrow_mut().add(SocketEvent::OnConnected());
 }
 
-pub(crate) fn handle_cookie_ack(state: &mut State, ctx: &mut Context<'_, '_>, now: SocketTime) {
+pub(crate) fn handle_cookie_ack(state: &mut State, ctx: &mut Context<'_>, now: SocketTime) {
     if !matches!(state, State::CookieEchoed(_)) {
         // From <https://datatracker.ietf.org/doc/html/rfc9260#section-5.2.5>:
         //
@@ -386,7 +386,7 @@ pub(crate) fn handle_cookie_ack(state: &mut State, ctx: &mut Context<'_, '_>, no
     ctx.events.borrow_mut().add(SocketEvent::OnConnected());
 }
 
-pub(crate) fn send_init(state: &mut State, ctx: &mut Context<'_, '_>) {
+pub(crate) fn send_init(state: &mut State, ctx: &mut Context<'_>) {
     let &mut State::CookieWait(ref s) = state else {
         unreachable!();
     };
@@ -409,10 +409,10 @@ pub(crate) fn send_init(state: &mut State, ctx: &mut Context<'_, '_>) {
         }))
         .build(),
     ));
-    *ctx.tx_packets_count += 1;
+    ctx.metrics.tx_packets_count += 1;
 }
 
-pub(crate) fn handle_t1init_timeout(state: &mut State, ctx: &mut Context<'_, '_>, now: SocketTime) {
+pub(crate) fn handle_t1init_timeout(state: &mut State, ctx: &mut Context<'_>, now: SocketTime) {
     let &mut State::CookieWait(ref mut s) = state else { unreachable!() };
     if s.t1_init.expire(now) {
         if s.t1_init.is_running() {
@@ -423,7 +423,7 @@ pub(crate) fn handle_t1init_timeout(state: &mut State, ctx: &mut Context<'_, '_>
     }
 }
 
-pub(crate) fn handle_t1cookie_timeout(state: &mut State, ctx: &mut Context<'_, '_>, now: SocketTime) {
+pub(crate) fn handle_t1cookie_timeout(state: &mut State, ctx: &mut Context<'_>, now: SocketTime) {
     let &mut State::CookieEchoed(ref mut s) = state else { unreachable!() };
     if s.t1_cookie.expire(now) {
         if !s.t1_cookie.is_running() {

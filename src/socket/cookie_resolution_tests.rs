@@ -34,7 +34,7 @@ mod tests {
         Options::default()
     }
 
-    fn connect_sockets(socket_a: &mut Socket<'_>, socket_z: &mut Socket<'_>) {
+    fn connect_sockets(socket_a: &mut Socket, socket_z: &mut Socket) {
         socket_a.connect();
         socket_z.handle_input(&expect_sent_packet!(socket_a.poll_event()));
         socket_a.handle_input(&expect_sent_packet!(socket_z.poll_event()));

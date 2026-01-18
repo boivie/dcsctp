@@ -21,7 +21,7 @@ use log::debug;
 #[cfg(test)]
 use std::println as debug;
 
-pub(crate) fn handle_data(state: &mut State, ctx: &mut Context<'_, '_>, now: SocketTime, tsn: Tsn, data: Data) {
+pub(crate) fn handle_data(state: &mut State, ctx: &mut Context<'_>, now: SocketTime, tsn: Tsn, data: Data) {
     if data.payload.is_empty() {
         ctx.events.borrow_mut().add(SocketEvent::OnError(
             ErrorKind::ProtocolViolation,
@@ -37,7 +37,7 @@ pub(crate) fn handle_data(state: &mut State, ctx: &mut Context<'_, '_>, now: Soc
                     }))
                     .build(),
             ));
-            *ctx.tx_packets_count += 1;
+            ctx.metrics.tx_packets_count += 1;
         }
         return;
     }
@@ -67,7 +67,7 @@ pub(crate) fn handle_data(state: &mut State, ctx: &mut Context<'_, '_>, now: Soc
     }
 }
 
-pub(crate) fn handle_sack(state: &mut State, ctx: &mut Context<'_, '_>, now: SocketTime, sack: SackChunk) {
+pub(crate) fn handle_sack(state: &mut State, ctx: &mut Context<'_>, now: SocketTime, sack: SackChunk) {
     let Some(tcb) = state.tcb_mut() else {
         ctx.events
             .borrow_mut()
@@ -88,7 +88,7 @@ pub(crate) fn handle_sack(state: &mut State, ctx: &mut Context<'_, '_>, now: Soc
                 tcb.data_tracker.update_rto(tcb.rto.rto());
             }
             if reset_error_counter {
-                ctx.tx_error_counter.reset();
+                ctx.metrics.tx_error_counter.reset();
             }
         }
     }
@@ -115,7 +115,7 @@ pub(crate) fn handle_sack(state: &mut State, ctx: &mut Context<'_, '_>, now: Soc
     ctx.send_buffered_packets(state, now);
 }
 
-pub(crate) fn maybe_send_fast_retransmit(state: &mut State, ctx: &mut Context<'_, '_>, now: SocketTime) {
+pub(crate) fn maybe_send_fast_retransmit(state: &mut State, ctx: &mut Context<'_>, now: SocketTime) {
     let tcb = state.tcb_mut().unwrap();
     if !tcb.retransmission_queue.has_data_to_be_fast_retransmitted() {
         return;
@@ -131,12 +131,12 @@ pub(crate) fn maybe_send_fast_retransmit(state: &mut State, ctx: &mut Context<'_
 
     debug_assert!(!builder.is_empty());
     ctx.events.borrow_mut().add(SocketEvent::SendPacket(builder.build()));
-    *ctx.tx_packets_count += 1;
+    ctx.metrics.tx_packets_count += 1;
 }
 
 pub(crate) fn handle_forward_tsn(
     state: &mut State,
-    _ctx: &mut Context<'_, '_>, // Unused
+    _ctx: &mut Context<'_>, // Unused
     now: SocketTime,
     new_cumulative_tsn: Tsn,
     skipped_streams: Vec<SkippedStream>,
@@ -148,9 +148,9 @@ pub(crate) fn handle_forward_tsn(
     }
 }
 
-pub(crate) fn handle_iforward_tsn(_state: &mut State, _ctx: &mut Context<'_, '_>, _now: SocketTime, _chunk: IForwardTsnChunk) {}
+pub(crate) fn handle_iforward_tsn(_state: &mut State, _ctx: &mut Context<'_>, _now: SocketTime, _chunk: IForwardTsnChunk) {}
 
-pub(crate) fn maybe_send_sack(state: &mut State, ctx: &mut Context<'_, '_>, now: SocketTime) {
+pub(crate) fn maybe_send_sack(state: &mut State, ctx: &mut Context<'_>, now: SocketTime) {
     if let Some(tcb) = state.tcb_mut() {
         tcb.data_tracker.observe_packet_end(now);
         if tcb.data_tracker.should_send_ack(now, false) {

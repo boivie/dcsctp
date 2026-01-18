@@ -16,7 +16,7 @@ use crate::transition_between;
 use crate::timer::BackoffAlgorithm;
 use crate::timer::Timer;
 
-pub(crate) fn maybe_send_shutdown(state: &mut State, ctx: &mut Context<'_, '_>, now: SocketTime) {
+pub(crate) fn maybe_send_shutdown(state: &mut State, ctx: &mut Context<'_>, now: SocketTime) {
     let State::ShutdownPending(tcb) = state else { unreachable!() };
     if tcb.retransmission_queue.unacked_bytes() != 0 {
         // Not ready to shutdown yet.
@@ -45,7 +45,7 @@ pub(crate) fn maybe_send_shutdown(state: &mut State, ctx: &mut Context<'_, '_>, 
     send_shutdown(state, ctx);
 }
 
-pub(crate) fn maybe_send_shutdown_ack(state: &mut State, ctx: &mut Context<'_, '_>) {
+pub(crate) fn maybe_send_shutdown_ack(state: &mut State, ctx: &mut Context<'_>) {
     let State::ShutdownReceived(tcb) = state else { unreachable!() };
     if tcb.retransmission_queue.unacked_bytes() != 0 {
         // Not ready to shutdown yet.
@@ -65,7 +65,7 @@ pub(crate) fn maybe_send_shutdown_ack(state: &mut State, ctx: &mut Context<'_, '
     send_shutdown_ack(state, ctx);
 }
 
-pub(crate) fn send_shutdown(state: &mut State, ctx: &mut Context<'_, '_>) {
+pub(crate) fn send_shutdown(state: &mut State, ctx: &mut Context<'_>) {
     let State::ShutdownSent(ShutdownSentState { tcb, .. }) = state else {
         unreachable!()
     };
@@ -76,18 +76,18 @@ pub(crate) fn send_shutdown(state: &mut State, ctx: &mut Context<'_, '_>) {
             }))
             .build(),
     ));
-    *ctx.tx_packets_count += 1;
+    ctx.metrics.tx_packets_count += 1;
 }
 
-pub(crate) fn send_shutdown_ack(state: &mut State, ctx: &mut Context<'_, '_>) {
+pub(crate) fn send_shutdown_ack(state: &mut State, ctx: &mut Context<'_>) {
     let State::ShutdownAckSent(tcb) = state else { unreachable!() };
     ctx.events.borrow_mut().add(SocketEvent::SendPacket(
         tcb.new_packet().add(&Chunk::ShutdownAck(ShutdownAckChunk {})).build(),
     ));
-    *ctx.tx_packets_count += 1;
+    ctx.metrics.tx_packets_count += 1;
 }
 
-pub(crate) fn handle_shutdown(state: &mut State, ctx: &mut Context<'_, '_>) {
+pub(crate) fn handle_shutdown(state: &mut State, ctx: &mut Context<'_>) {
     match state {
         State::Closed
         | State::ShutdownReceived(_)
@@ -130,7 +130,7 @@ pub(crate) fn handle_shutdown(state: &mut State, ctx: &mut Context<'_, '_>) {
     }
 }
 
-pub(crate) fn handle_shutdown_ack(state: &mut State, ctx: &mut Context<'_, '_>, header: &CommonHeader) {
+pub(crate) fn handle_shutdown_ack(state: &mut State, ctx: &mut Context<'_>, header: &CommonHeader) {
     match state {
         State::ShutdownSent(ShutdownSentState { tcb, .. }) | State::ShutdownAckSent(tcb) => {
             // From <https://datatracker.ietf.org/doc/html/rfc9260#section-9.2-14>:
@@ -151,7 +151,7 @@ pub(crate) fn handle_shutdown_ack(state: &mut State, ctx: &mut Context<'_, '_>, 
                     }))
                     .build(),
             ));
-            *ctx.tx_packets_count += 1;
+            ctx.metrics.tx_packets_count += 1;
             ctx.internal_close(state, ErrorKind::NoError, "".to_string());
         }
         _ => {
@@ -179,12 +179,12 @@ pub(crate) fn handle_shutdown_ack(state: &mut State, ctx: &mut Context<'_, '_>, 
                 .add(&Chunk::ShutdownComplete(ShutdownCompleteChunk { tag_reflected: true }))
                 .build(),
             ));
-            *ctx.tx_packets_count += 1;
+            ctx.metrics.tx_packets_count += 1;
         }
     }
 }
 
-pub(crate) fn handle_shutdown_complete(state: &mut State, ctx: &mut Context<'_, '_>, _chunk: ShutdownCompleteChunk) {
+pub(crate) fn handle_shutdown_complete(state: &mut State, ctx: &mut Context<'_>, _chunk: ShutdownCompleteChunk) {
     if let State::ShutdownAckSent(_) = state {
         // From <https://datatracker.ietf.org/doc/html/rfc9260#section-9.2-15>:
         //
@@ -197,7 +197,7 @@ pub(crate) fn handle_shutdown_complete(state: &mut State, ctx: &mut Context<'_, 
     }
 }
 
-pub(crate) fn maybe_send_shutdown_on_packet_received(state: &mut State, ctx: &mut Context<'_, '_>, now: SocketTime, chunks: &[Chunk]) {
+pub(crate) fn maybe_send_shutdown_on_packet_received(state: &mut State, ctx: &mut Context<'_>, now: SocketTime, chunks: &[Chunk]) {
     if let State::ShutdownSent(s) = state {
         if chunks.iter().any(|c| matches!(c, Chunk::Data(_))) {
             // From <https://datatracker.ietf.org/doc/html/rfc9260#section-9.2-10>:
@@ -212,7 +212,7 @@ pub(crate) fn maybe_send_shutdown_on_packet_received(state: &mut State, ctx: &mu
     }
 }
 
-pub(crate) fn handle_t2_shutdown_timeout(state: &mut State, ctx: &mut Context<'_, '_>, now: SocketTime) {
+pub(crate) fn handle_t2_shutdown_timeout(state: &mut State, ctx: &mut Context<'_>, now: SocketTime) {
     let State::ShutdownSent(s) = state else {
         return;
     };
@@ -234,7 +234,7 @@ pub(crate) fn handle_t2_shutdown_timeout(state: &mut State, ctx: &mut Context<'_
                 }))
                 .build(),
         ));
-        *ctx.tx_packets_count += 1;
+        ctx.metrics.tx_packets_count += 1;
         ctx.internal_close(state, ErrorKind::TooManyRetries, "Too many retransmissions".into());
     }
 }

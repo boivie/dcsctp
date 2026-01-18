@@ -11,7 +11,7 @@ use crate::packet::write_u32_be;
 use crate::socket::context::Context;
 use crate::socket::state::State;
 
-pub(crate) fn handle_heartbeat_req(state: &mut State, ctx: &mut Context<'_, '_>, chunk: HeartbeatRequestChunk) {
+pub(crate) fn handle_heartbeat_req(state: &mut State, ctx: &mut Context<'_>, chunk: HeartbeatRequestChunk) {
     // From <https://datatracker.ietf.org/doc/html/rfc9260#section-8.3-9>:
     //
     //   The receiver of the HEARTBEAT chunk SHOULD immediately respond with a HEARTBEAT ACK
@@ -23,11 +23,11 @@ pub(crate) fn handle_heartbeat_req(state: &mut State, ctx: &mut Context<'_, '_>,
                 .add(&Chunk::HeartbeatAck(HeartbeatAckChunk { parameters: chunk.parameters }))
                 .build(),
         ));
-        *ctx.tx_packets_count += 1;
+        ctx.metrics.tx_packets_count += 1;
     }
 }
 
-pub(crate) fn handle_heartbeat_ack(_state: &mut State, ctx: &mut Context<'_, '_>, now: SocketTime, chunk: HeartbeatAckChunk) {
+pub(crate) fn handle_heartbeat_ack(_state: &mut State, ctx: &mut Context<'_>, now: SocketTime, chunk: HeartbeatAckChunk) {
     // state is unused here? No, Socket had this method.
     // It uses `self.heartbeat_timeout`, `self.heartbeat_counter`, `self.heartbeat_sent_time`, `self.tx_error_counter`.
     // These are all in Context.
@@ -61,7 +61,7 @@ pub(crate) fn handle_heartbeat_ack(_state: &mut State, ctx: &mut Context<'_, '_>
                 //
                 //   When a HEARTBEAT ACK chunk is received from the peer endpoint, the counter
                 //   SHOULD also be reset.
-                ctx.tx_error_counter.reset();
+                ctx.metrics.tx_error_counter.reset();
             }
         }
         _ => {
@@ -73,7 +73,7 @@ pub(crate) fn handle_heartbeat_ack(_state: &mut State, ctx: &mut Context<'_, '_>
     }
 }
 
-pub(crate) fn handle_heartbeat_timeouts(state: &mut State, ctx: &mut Context<'_, '_>, now: SocketTime) {
+pub(crate) fn handle_heartbeat_timeouts(state: &mut State, ctx: &mut Context<'_>, now: SocketTime) {
     if ctx.heartbeat_interval.expire(now) {
         if let Some(tcb) = state.tcb() {
             ctx.heartbeat_timeout.set_duration(ctx.options.rto_initial);
@@ -91,13 +91,13 @@ pub(crate) fn handle_heartbeat_timeouts(state: &mut State, ctx: &mut Context<'_,
                     }))
                     .build(),
             ));
-            *ctx.tx_packets_count += 1;
+            ctx.metrics.tx_packets_count += 1;
         }
     }
     if ctx.heartbeat_timeout.expire(now) {
         // Note that the timeout timer is not restarted. It will be started again when the
         // interval timer expires.
         debug_assert!(!ctx.heartbeat_timeout.is_running());
-        ctx.tx_error_counter.increment();
+        ctx.metrics.tx_error_counter.increment();
     }
 }
