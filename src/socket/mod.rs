@@ -47,10 +47,10 @@ use crate::tx::send_queue::SendQueue;
 use crate::types::Tsn;
 #[cfg(not(test))]
 use log::warn;
-#[cfg(test)]
-use std::println as warn;
 use rand::Rng;
 use std::cell::RefCell;
+#[cfg(test)]
+use std::println as warn;
 use std::rc::Rc;
 
 pub mod capabilities;
@@ -64,10 +64,18 @@ pub(crate) mod state;
 pub(crate) mod util;
 
 use context::Context;
-use handlers::{data, handshake, heartbeat, reconfig, shutdown, error as error_handler};
+use handlers::data;
+use handlers::error as error_handler;
+use handlers::handshake;
+use handlers::heartbeat;
+use handlers::reconfig;
+use handlers::shutdown;
 use metrics::SocketMetrics;
-use state::{CookieWaitState, State};
-use util::{closest_timeout, LoggingEvents, TxErrorCounter};
+use state::CookieWaitState;
+use state::State;
+use util::LoggingEvents;
+use util::TxErrorCounter;
+use util::closest_timeout;
 
 #[cfg(test)]
 pub mod socket_tests;
@@ -89,20 +97,8 @@ const MAX_INITIAL_TSN: u32 = u32::MAX;
 pub struct Socket {
     name: String,
     now: Rc<RefCell<SocketTime>>,
-    options: Options,
     state: State,
-    events: Rc<RefCell<dyn EventSink>>,
-    send_queue: SendQueue,
-
-    limit_forward_tsn_until: SocketTime,
-
-    heartbeat_interval: Timer,
-    heartbeat_timeout: Timer,
-    heartbeat_counter: u32,
-    heartbeat_sent_time: SocketTime,
-
-    metrics: SocketMetrics,
-    peer_implementation: SctpImplementation,
+    ctx: Context,
 }
 
 impl Socket {
@@ -116,11 +112,8 @@ impl Socket {
         let events: Rc<RefCell<dyn EventSink>> =
             Rc::new(RefCell::new(LoggingEvents::new(events, name.into(), Rc::clone(&now))));
         let sqe = Rc::clone(&events);
-        Socket {
-            name: name.into(),
-            now,
+        let ctx = Context {
             options: options.clone(),
-            state: State::Closed,
             events,
             send_queue: SendQueue::new(options.mtu, options, sqe),
             limit_forward_tsn_until: SocketTime::zero(),
@@ -145,41 +138,25 @@ impl Socket {
                 tx_error_counter: TxErrorCounter::new(options.max_retransmissions),
             },
             peer_implementation: SctpImplementation::Unknown,
-        }
-    }
-    
-    fn create_context<'b>(&'b mut self) -> (Context<'b>, &'b mut State) {
-        (
-            Context {
-                options: &self.options,
-                events: &self.events,
-                send_queue: &mut self.send_queue,
-                limit_forward_tsn_until: &mut self.limit_forward_tsn_until,
-                heartbeat_interval: &mut self.heartbeat_interval,
-                heartbeat_timeout: &mut self.heartbeat_timeout,
-                heartbeat_counter: &mut self.heartbeat_counter,
-                heartbeat_sent_time: &mut self.heartbeat_sent_time,
-                metrics: &mut self.metrics,
-                peer_implementation: &mut self.peer_implementation,
-            },
-            &mut self.state,
-        )
+        };
+ 
+        Socket { name: name.into(), now, state: State::Closed, ctx }
     }
 
     fn validate_send(&self, message: &Message, send_options: &SendOptions) -> SendStatus {
         let lifecycle_id = &send_options.lifecycle_id;
         let add_error_events = |kind, msg: &str| {
             if let Some(id) = lifecycle_id {
-                self.events.borrow_mut().add(SocketEvent::OnLifecycleEnd(id.clone()));
+                self.ctx.events.borrow_mut().add(SocketEvent::OnLifecycleEnd(id.clone()));
             }
-            self.events.borrow_mut().add(SocketEvent::OnError(kind, msg.to_string()));
+            self.ctx.events.borrow_mut().add(SocketEvent::OnError(kind, msg.to_string()));
         };
 
         if message.payload.is_empty() {
             add_error_events(ErrorKind::ProtocolViolation, "Unable to send empty message");
             return SendStatus::ErrorMessageEmpty;
         }
-        if message.payload.len() > self.options.max_message_size {
+        if message.payload.len() > self.ctx.options.max_message_size {
             add_error_events(ErrorKind::ProtocolViolation, "Unable to send too large message");
             return SendStatus::ErrorMessageTooLarge;
         }
@@ -196,9 +173,9 @@ impl Socket {
             );
             return SendStatus::ErrorShuttingDown;
         }
-        if self.send_queue.total_buffered_amount() >= self.options.max_send_buffer_size
-            || self.send_queue.buffered_amount(message.stream_id)
-                >= self.options.per_stream_send_queue_limit
+        if self.ctx.send_queue.total_buffered_amount() >= self.ctx.options.max_send_buffer_size
+            || self.ctx.send_queue.buffered_amount(message.stream_id)
+                >= self.ctx.options.per_stream_send_queue_limit
         {
             add_error_events(
                 ErrorKind::ResourceExhaustion,
@@ -208,7 +185,7 @@ impl Socket {
         }
         SendStatus::Success
     }
-    
+
     pub fn verification_tag(&self) -> u32 {
         self.state.tcb().map_or(0, |tcb| tcb.my_verification_tag)
     }
@@ -216,7 +193,7 @@ impl Socket {
 
 impl DcSctpSocket for Socket {
     fn poll_event(&mut self) -> Option<SocketEvent> {
-        self.events.borrow_mut().next_event()
+        self.ctx.events.borrow_mut().next_event()
     }
 
     fn get_next_message(&mut self) -> Option<Message> {
@@ -230,58 +207,88 @@ impl DcSctpSocket for Socket {
         };
         let now = *self.now.borrow();
         let mut t1_init = Timer::new(
-            self.options.t1_init_timeout,
+            self.ctx.options.t1_init_timeout,
             BackoffAlgorithm::Exponential,
-            self.options.max_init_retransmits,
+            self.ctx.options.max_init_retransmits,
             None,
         );
         t1_init.start(now);
         let initial_tsn = Tsn(rand::rng().random_range(MIN_INITIAL_TSN..MAX_INITIAL_TSN));
         let verification_tag = rand::rng().random_range(MIN_VERIFICATION_TAG..MAX_VERIFICATION_TAG);
         self.state = State::CookieWait(CookieWaitState { t1_init, initial_tsn, verification_tag });
-        
-        // Delegate to handler
-        let (mut ctx, state) = self.create_context();
-        handshake::send_init(state, &mut ctx);
+
+        handshake::send_init(&mut self.state, &mut self.ctx);
     }
 
     fn handle_input(&mut self, packet: &[u8]) {
-        self.metrics.rx_packets_count += 1;
+        self.ctx.metrics.rx_packets_count += 1;
         let now = *self.now.borrow();
         log_packet(&self.name, now.into(), false, packet);
 
-        match SctpPacket::from_bytes(packet, &self.options) {
+        match SctpPacket::from_bytes(packet, &self.ctx.options) {
             Err(_e) => {
-                self.events.borrow_mut().add(SocketEvent::OnError(
+                self.ctx.events.borrow_mut().add(SocketEvent::OnError(
                     ErrorKind::ParseFailed,
                     "Failed to parse SCTP packet".into(),
                 ));
             }
             Ok(packet) => {
-                let (mut ctx, state) = self.create_context();
-                shutdown::maybe_send_shutdown_on_packet_received(state, &mut ctx, now, &packet.chunks);
-                
+                shutdown::maybe_send_shutdown_on_packet_received(
+                    &mut self.state,
+                    &mut self.ctx,
+                    now,
+                    &packet.chunks,
+                );
+
                 for chunk in packet.chunks {
                     match chunk {
                         Chunk::Data(DataChunk { tsn, data })
                         | Chunk::IData(IDataChunk { tsn, data }) => {
-                             data::handle_data(state, &mut ctx, now, tsn, data);
+                            data::handle_data(&mut self.state, &mut self.ctx, now, tsn, data);
                         }
-                        Chunk::Init(c) => handshake::handle_init(state, &mut ctx, c),
-                        Chunk::InitAck(c) => handshake::handle_init_ack(state, &mut ctx, now, c),
-                        Chunk::Sack(c) => data::handle_sack(state, &mut ctx, now, c),
-                        Chunk::Abort(c) => error_handler::handle_abort(state, &mut ctx, c),
-                        Chunk::Shutdown(_) => shutdown::handle_shutdown(state, &mut ctx),
-                        Chunk::ShutdownAck(_) => shutdown::handle_shutdown_ack(state, &mut ctx, &packet.common_header),
-                        Chunk::Error(c) => error_handler::handle_error(state, &mut ctx, c),
+                        Chunk::Init(c) => handshake::handle_init(&mut self.state, &mut self.ctx, c),
+                        Chunk::InitAck(c) => {
+                            handshake::handle_init_ack(&mut self.state, &mut self.ctx, now, c)
+                        }
+                        Chunk::Sack(c) => data::handle_sack(&mut self.state, &mut self.ctx, now, c),
+                        Chunk::Abort(c) => {
+                            error_handler::handle_abort(&mut self.state, &mut self.ctx, c)
+                        }
+                        Chunk::Shutdown(_) => {
+                            shutdown::handle_shutdown(&mut self.state, &mut self.ctx)
+                        }
+                        Chunk::ShutdownAck(_) => shutdown::handle_shutdown_ack(
+                            &mut self.state,
+                            &mut self.ctx,
+                            &packet.common_header,
+                        ),
+                        Chunk::Error(c) => {
+                            error_handler::handle_error(&mut self.state, &mut self.ctx, c)
+                        }
                         Chunk::CookieEcho(c) => {
-                            handshake::handle_cookie_echo(state, &mut ctx, now, &packet.common_header, c);
+                            handshake::handle_cookie_echo(
+                                &mut self.state,
+                                &mut self.ctx,
+                                now,
+                                &packet.common_header,
+                                c,
+                            );
                         }
-                        Chunk::CookieAck(_) => handshake::handle_cookie_ack(state, &mut ctx, now),
-                        Chunk::HeartbeatRequest(c) => heartbeat::handle_heartbeat_req(state, &mut ctx, c),
-                        Chunk::HeartbeatAck(c) => heartbeat::handle_heartbeat_ack(state, &mut ctx, now, c),
-                        Chunk::ShutdownComplete(c) => shutdown::handle_shutdown_complete(state, &mut ctx, c),
-                        Chunk::ReConfig(c) => reconfig::handle_reconfig(state, &mut ctx, now, c),
+                        Chunk::CookieAck(_) => {
+                            handshake::handle_cookie_ack(&mut self.state, &mut self.ctx, now)
+                        }
+                        Chunk::HeartbeatRequest(c) => {
+                            heartbeat::handle_heartbeat_req(&mut self.state, &mut self.ctx, c)
+                        }
+                        Chunk::HeartbeatAck(c) => {
+                            heartbeat::handle_heartbeat_ack(&mut self.state, &mut self.ctx, now, c)
+                        }
+                        Chunk::ShutdownComplete(c) => {
+                            shutdown::handle_shutdown_complete(&mut self.state, &mut self.ctx, c)
+                        }
+                        Chunk::ReConfig(c) => {
+                            reconfig::handle_reconfig(&mut self.state, &mut self.ctx, now, c)
+                        }
                         Chunk::ForwardTsn(ForwardTsnChunk {
                             new_cumulative_tsn,
                             skipped_streams,
@@ -289,15 +296,25 @@ impl DcSctpSocket for Socket {
                         | Chunk::IForwardTsn(IForwardTsnChunk {
                             new_cumulative_tsn,
                             skipped_streams,
-                        }) => data::handle_forward_tsn(state, &mut ctx, now, new_cumulative_tsn, skipped_streams),
+                        }) => data::handle_forward_tsn(
+                            &mut self.state,
+                            &mut self.ctx,
+                            now,
+                            new_cumulative_tsn,
+                            skipped_streams,
+                        ),
                         Chunk::Unknown(c) => {
-                            if !error_handler::handle_unrecognized_chunk(state, &mut ctx, c) {
+                            if !error_handler::handle_unrecognized_chunk(
+                                &mut self.state,
+                                &mut self.ctx,
+                                c,
+                            ) {
                                 break;
                             }
                         }
                     }
                 }
-                data::maybe_send_sack(state, &mut ctx, now);
+                data::maybe_send_sack(&mut self.state, &mut self.ctx, now);
             }
         }
     }
@@ -308,46 +325,45 @@ impl DcSctpSocket for Socket {
             return;
         }
         self.now.replace(now);
-        
-        let (mut ctx, state) = self.create_context();
 
-        if let Some(tcb) = state.tcb_mut() {
+        if let Some(tcb) = self.state.tcb_mut() {
             tcb.data_tracker.handle_timeout(now);
             if tcb.retransmission_queue.handle_timeout(now) {
-                ctx.metrics.tx_error_counter.increment();
+                self.ctx.metrics.tx_error_counter.increment();
             }
         }
-        
-        match state {
-            State::Closed => {}
-            State::CookieWait(_) => {
-                handshake::handle_t1init_timeout(state, &mut ctx, now);
-            }
-            State::CookieEchoed(s) => {
-                // NOTE: Only let the t1-cookie timer drive retransmissions.
-                debug_assert!(s.t1_cookie.is_running());
-                handshake::handle_t1cookie_timeout(state, &mut ctx, now);
-            }
+
+        if matches!(self.state, State::Closed) {
+            // Nothing to do
+        } else if matches!(self.state, State::CookieWait(_)) {
+            handshake::handle_t1init_timeout(&mut self.state, &mut self.ctx, now);
+        } else if let State::CookieEchoed(s) = &self.state {
+            // NOTE: Only let the t1-cookie timer drive retransmissions.
+            debug_assert!(s.t1_cookie.is_running());
+            // Drop borrow
+            handshake::handle_t1cookie_timeout(&mut self.state, &mut self.ctx, now);
+        } else if matches!(
+            self.state,
             State::Established(_)
-            | State::ShutdownPending(_)
-            | State::ShutdownSent(_)
-            | State::ShutdownReceived(_)
-            | State::ShutdownAckSent(_) => {
-                heartbeat::handle_heartbeat_timeouts(state, &mut ctx, now);
-                reconfig::handle_reconfig_timeout(state, &mut ctx, now);
-                shutdown::handle_t2_shutdown_timeout(state, &mut ctx, now);
-            }
+                | State::ShutdownPending(_)
+                | State::ShutdownSent(_)
+                | State::ShutdownReceived(_)
+                | State::ShutdownAckSent(_)
+        ) {
+            heartbeat::handle_heartbeat_timeouts(&mut self.state, &mut self.ctx, now);
+            reconfig::handle_reconfig_timeout(&mut self.state, &mut self.ctx, now);
+            shutdown::handle_t2_shutdown_timeout(&mut self.state, &mut self.ctx, now);
         }
-        if let Some(tcb) = state.tcb_mut() {
-            if ctx.metrics.tx_error_counter.is_exhausted() {
+        if let Some(tcb) = self.state.tcb_mut() {
+            if self.ctx.metrics.tx_error_counter.is_exhausted() {
                 // We need to send ABORT.
                 // This logic was in advance_time.
                 // I should extract it or handle it here using context.
+                use crate::packet::abort_chunk::AbortChunk;
                 use crate::packet::error_causes::ErrorCause;
                 use crate::packet::user_initiated_abort_error_cause::UserInitiatedAbortErrorCause;
-                use crate::packet::abort_chunk::AbortChunk;
-                
-                 ctx.events.borrow_mut().add(SocketEvent::SendPacket(
+
+                self.ctx.events.borrow_mut().add(SocketEvent::SendPacket(
                     tcb.new_packet()
                         .add(&Chunk::Abort(AbortChunk {
                             error_causes: vec![ErrorCause::UserInitiatedAbort(
@@ -358,9 +374,12 @@ impl DcSctpSocket for Socket {
                         }))
                         .build(),
                 ));
-                ctx.metrics.tx_packets_count += 1;
-                // internal_close requires context.
-                ctx.internal_close(state, ErrorKind::TooManyRetries, "Too many retransmissions".into());
+                self.ctx.metrics.tx_packets_count += 1;
+                self.ctx.internal_close(
+                    &mut self.state,
+                    ErrorKind::TooManyRetries,
+                    "Too many retransmissions".into(),
+                );
                 return;
             }
 
@@ -368,8 +387,8 @@ impl DcSctpSocket for Socket {
             //
             //   [...] until the COOKIE ACK chunk is returned, the sender MUST NOT send any other
             //   packets to the peer.
-            if !matches!(state, State::CookieEchoed(_)) {
-                ctx.send_buffered_packets(state, now);
+            if !matches!(self.state, State::CookieEchoed(_)) {
+                self.ctx.send_buffered_packets(&mut self.state, now);
             }
         }
     }
@@ -393,8 +412,8 @@ impl DcSctpSocket for Socket {
                 let mut timeout = tcb.retransmission_queue.next_timeout();
                 timeout = closest_timeout(timeout, tcb.reconfig_timer.next_expiry());
                 timeout = closest_timeout(timeout, tcb.data_tracker.next_timeout());
-                timeout = closest_timeout(timeout, self.heartbeat_interval.next_expiry());
-                timeout = closest_timeout(timeout, self.heartbeat_timeout.next_expiry());
+                timeout = closest_timeout(timeout, self.ctx.heartbeat_interval.next_expiry());
+                timeout = closest_timeout(timeout, self.ctx.heartbeat_timeout.next_expiry());
                 if let State::ShutdownSent(ref s) = self.state {
                     timeout = closest_timeout(timeout, s.t2_shutdown.next_expiry());
                 }
@@ -409,9 +428,8 @@ impl DcSctpSocket for Socket {
 
     fn shutdown(&mut self) {
         let now = *self.now.borrow();
-        let (mut ctx, state) = self.create_context();
 
-        match state {
+        match self.state {
             State::Closed
             | State::ShutdownPending(_)
             | State::ShutdownSent(_)
@@ -423,60 +441,59 @@ impl DcSctpSocket for Socket {
                 // Connection closed during the initial connection phase. There is no outstanding
                 // data, so the socket can just be closed (stopping any connection timers, if any),
                 // as this is the client's intention, by calling [shutdown()].
-                ctx.internal_close(state, ErrorKind::NoError, "".to_string());
+                self.ctx.internal_close(&mut self.state, ErrorKind::NoError, "".to_string());
             }
             State::CookieEchoed(_) | State::Established(_) => {
-                 // We need to transition state. 
-                 // Context doesn't offer `transition_between` directly on arbitrary states easily without macros visible.
-                 // But we can use `util::transition_between`.
-                 // However, we need to match first to get `tcb`.
-                 // Let's modify state directly here, it's fine.
-                 
-                 // We can use the logic from handshake/shutdown handlers if available?
-                 // `shutdown::handle_shutdown` is for receiving shutdown chunk.
-                 // This is User initiated shutdown.
-                 
-                 // Logic:
-                 if let Some(_tcb) = state.tcb_mut() {
-                     // We need to take TCB out of state.
-                     // The macro `transition_between` does `mem::replace`.
-                     // We can replicate logic or import macro.
-                     // Macro is exported in util.rs as `macro_rules! transition_between`.
-                     // Since `util` is pub(crate), we can use it?
-                     // Macros are usually `#[macro_use]` or `use crate::transition_between`.
-                     // I exported it.
-                     // But I didn't add `#[macro_use]` on `extern crate` or `mod`.
-                     // In Rust 2018+, macros are imported like items.
-                     // I added `use util::transition_between` ? check util.rs
-                     // `transition_between!` is a macro.
-                     // I need to use `crate::transition_between!` or import it.
-                     // If I put `#[macro_export]` in `util.rs`, it is at crate root.
-                     // So `use crate::transition_between;`
-                 }
-                 
-                 // Workaround: manual transition.
-                 let prev_state = std::mem::replace(state, State::Closed);
-                 let tcb = match prev_state {
-                     State::CookieEchoed(state::CookieEchoState { tcb, .. }) 
-                     | State::Established(tcb) => tcb,
-                     _ => unreachable!(),
-                 };
-                 *state = State::ShutdownPending(tcb);
+                // We need to transition state.
+                // Context doesn't offer `transition_between` directly on arbitrary states easily
+                // without macros visible. But we can use
+                // `util::transition_between`. However, we need to match first to
+                // get `tcb`. Let's modify state directly here, it's fine.
 
-                 shutdown::maybe_send_shutdown(state, &mut ctx, now);
+                // We can use the logic from handshake/shutdown handlers if available?
+                // `shutdown::handle_shutdown` is for receiving shutdown chunk.
+                // This is User initiated shutdown.
+
+                // Logic:
+                if let Some(_tcb) = self.state.tcb_mut() {
+                    // We need to take TCB out of state.
+                    // The macro `transition_between` does `mem::replace`.
+                    // We can replicate logic or import macro.
+                    // Macro is exported in util.rs as `macro_rules! transition_between`.
+                    // Since `util` is pub(crate), we can use it?
+                    // Macros are usually `#[macro_use]` or `use crate::transition_between`.
+                    // I exported it.
+                    // But I didn't add `#[macro_use]` on `extern crate` or `mod`.
+                    // In Rust 2018+, macros are imported like items.
+                    // I added `use util::transition_between` ? check util.rs
+                    // `transition_between!` is a macro.
+                    // I need to use `crate::transition_between!` or import it.
+                    // If I put `#[macro_export]` in `util.rs`, it is at crate root.
+                    // So `use crate::transition_between;`
+                }
+
+                // Workaround: manual transition.
+                let prev_state = std::mem::replace(&mut self.state, State::Closed);
+                let tcb = match prev_state {
+                    State::CookieEchoed(state::CookieEchoState { tcb, .. })
+                    | State::Established(tcb) => tcb,
+                    _ => unreachable!(),
+                };
+                self.state = State::ShutdownPending(tcb);
+
+                shutdown::maybe_send_shutdown(&mut self.state, &mut self.ctx, now);
             }
         }
     }
 
     fn close(&mut self) {
-        let (mut ctx, state) = self.create_context();
-        if !matches!(state, State::Closed) {
-            if let Some(tcb) = state.tcb() {
+        if !matches!(self.state, State::Closed) {
+            if let Some(tcb) = self.state.tcb() {
+                use crate::packet::abort_chunk::AbortChunk;
                 use crate::packet::error_causes::ErrorCause;
                 use crate::packet::user_initiated_abort_error_cause::UserInitiatedAbortErrorCause;
-                use crate::packet::abort_chunk::AbortChunk;
-                
-                ctx.events.borrow_mut().add(SocketEvent::SendPacket(
+
+                self.ctx.events.borrow_mut().add(SocketEvent::SendPacket(
                     tcb.new_packet()
                         .add(&Chunk::Abort(AbortChunk {
                             error_causes: vec![ErrorCause::UserInitiatedAbort(
@@ -485,9 +502,9 @@ impl DcSctpSocket for Socket {
                         }))
                         .build(),
                 ));
-                ctx.metrics.tx_packets_count += 1;
+                self.ctx.metrics.tx_packets_count += 1;
             }
-            ctx.internal_close(state, ErrorKind::NoError, String::new());
+            self.ctx.internal_close(&mut self.state, ErrorKind::NoError, String::new());
         }
     }
 
@@ -511,19 +528,19 @@ impl DcSctpSocket for Socket {
     }
 
     fn options(&self) -> Options {
-        self.options.clone()
+        self.ctx.options.clone()
     }
 
     fn set_max_message_size(&mut self, max_message_size: usize) {
-        self.options.max_message_size = max_message_size;
+        self.ctx.options.max_message_size = max_message_size;
     }
 
     fn set_stream_priority(&mut self, stream_id: StreamId, priority: u16) {
-        self.send_queue.set_priority(stream_id, priority);
+        self.ctx.send_queue.set_priority(stream_id, priority);
     }
 
     fn get_stream_priority(&self, stream_id: StreamId) -> u16 {
-        self.send_queue.get_priority(stream_id)
+        self.ctx.send_queue.get_priority(stream_id)
     }
 
     fn send(&mut self, message: Message, send_options: &SendOptions) -> SendStatus {
@@ -533,11 +550,10 @@ impl DcSctpSocket for Socket {
         }
 
         let now = *self.now.borrow();
-        self.metrics.tx_messages_count += 1;
-        self.send_queue.add(now, message, send_options);
-        
-        let (mut ctx, state) = self.create_context();
-        ctx.send_buffered_packets(state, now);
+        self.ctx.metrics.tx_messages_count += 1;
+        self.ctx.send_queue.add(now, message, send_options);
+
+        self.ctx.send_buffered_packets(&mut self.state, now);
         SendStatus::Success
     }
 
@@ -548,15 +564,14 @@ impl DcSctpSocket for Socket {
             .map(|message| {
                 let status = self.validate_send(&message, send_options);
                 if status == SendStatus::Success {
-                    self.metrics.tx_messages_count += 1;
-                    self.send_queue.add(now, message, send_options);
+                    self.ctx.metrics.tx_messages_count += 1;
+                    self.ctx.send_queue.add(now, message, send_options);
                 }
                 status
             })
             .collect();
 
-        let (mut ctx, state) = self.create_context();
-        ctx.send_buffered_packets(state, now);
+        self.ctx.send_buffered_packets(&mut self.state, now);
         statuses
     }
 
@@ -569,46 +584,45 @@ impl DcSctpSocket for Socket {
         }
         let now = *self.now.borrow();
         for stream_id in outgoing_streams {
-            self.send_queue.prepare_reset_stream(*stream_id);
+            self.ctx.send_queue.prepare_reset_stream(*stream_id);
         }
 
         // This will send the SSN reset request control messagae.
-        let (mut ctx, state) = self.create_context();
-        ctx.send_buffered_packets(state, now);
+        self.ctx.send_buffered_packets(&mut self.state, now);
 
         ResetStreamsStatus::Performed
     }
 
     fn buffered_amount(&self, stream_id: StreamId) -> usize {
-        self.send_queue.buffered_amount(stream_id)
+        self.ctx.send_queue.buffered_amount(stream_id)
     }
 
     fn buffered_amount_low_threshold(&self, stream_id: StreamId) -> usize {
-        self.send_queue.buffered_amount_low_threshold(stream_id)
+        self.ctx.send_queue.buffered_amount_low_threshold(stream_id)
     }
 
     fn set_buffered_amount_low_threshold(&mut self, stream_id: StreamId, bytes: usize) {
-        self.send_queue.set_buffered_amount_low_threshold(stream_id, bytes);
+        self.ctx.send_queue.set_buffered_amount_low_threshold(stream_id, bytes);
     }
 
     fn get_metrics(&self) -> Option<Metrics> {
         let tcb = self.state.tcb()?;
 
         let packet_payload_size =
-            self.options.mtu - sctp_packet::COMMON_HEADER_SIZE - data_chunk::HEADER_SIZE;
+            self.ctx.options.mtu - sctp_packet::COMMON_HEADER_SIZE - data_chunk::HEADER_SIZE;
         Some(Metrics {
-            tx_packets_count: self.metrics.tx_packets_count,
-            tx_messages_count: self.metrics.tx_messages_count,
+            tx_packets_count: self.ctx.metrics.tx_packets_count,
+            tx_messages_count: self.ctx.metrics.tx_messages_count,
             rtx_packets_count: tcb.retransmission_queue.rtx_packets_count(),
             rtx_bytes_count: tcb.retransmission_queue.rtx_bytes_count(),
             cwnd_bytes: tcb.retransmission_queue.cwnd(),
             srtt: tcb.rto.srtt(),
             unack_data_count: tcb.retransmission_queue.unacked_items()
-                + self.send_queue.total_buffered_amount().div_ceil(packet_payload_size),
-            rx_packets_count: self.metrics.rx_packets_count,
+                + self.ctx.send_queue.total_buffered_amount().div_ceil(packet_payload_size),
+            rx_packets_count: self.ctx.metrics.rx_packets_count,
             rx_messages_count: tcb.reassembly_queue.rx_messages_count(),
             peer_rwnd_bytes: tcb.retransmission_queue.rwnd() as u32,
-            peer_implementation: self.peer_implementation,
+            peer_implementation: self.ctx.peer_implementation,
             uses_message_interleaving: tcb.capabilities.message_interleaving,
             uses_zero_checksum: tcb.capabilities.zero_checksum,
             negotiated_maximum_incoming_streams: tcb
@@ -624,7 +638,7 @@ impl DcSctpSocket for Socket {
         match &self.state {
             State::Closed => HandoverReadiness::READY,
             State::Established(tcb) => {
-                self.send_queue.get_handover_readiness() | tcb.get_handover_readiness()
+                self.ctx.send_queue.get_handover_readiness() | tcb.get_handover_readiness()
             }
             _ => HandoverReadiness::WRONG_CONNECTION_STATE,
         }
@@ -632,7 +646,7 @@ impl DcSctpSocket for Socket {
 
     fn restore_from_state(&mut self, state: &SocketHandoverState) {
         if !matches!(self.state, State::Closed) {
-            self.events.borrow_mut().add(SocketEvent::OnError(
+            self.ctx.events.borrow_mut().add(SocketEvent::OnError(
                 ErrorKind::NotConnected,
                 "Only closed socket can be restored from state".into(),
             ));
@@ -642,7 +656,7 @@ impl DcSctpSocket for Socket {
             return;
         }
 
-        self.send_queue.restore_from_state(state);
+        self.ctx.send_queue.restore_from_state(state);
 
         let capabilities = Capabilities {
             partial_reliability: state.capabilities.partial_reliability,
@@ -657,7 +671,7 @@ impl DcSctpSocket for Socket {
                 .negotiated_maximum_outgoing_streams,
         };
         let mut tcb = TransmissionControlBlock::new(
-            &self.options,
+            &self.ctx.options,
             state.my_verification_tag,
             Tsn(state.my_initial_tsn),
             state.peer_verification_tag,
@@ -665,12 +679,12 @@ impl DcSctpSocket for Socket {
             state.tie_tag,
             /* rwnd */ 0,
             capabilities,
-            Rc::clone(&self.events),
+            Rc::clone(&self.ctx.events),
         );
         tcb.restore_from_state(state);
 
         self.state = State::Established(tcb);
-        self.events.borrow_mut().add(SocketEvent::OnConnected());
+        self.ctx.events.borrow_mut().add(SocketEvent::OnConnected());
     }
 
     fn get_handover_state_and_close(&mut self) -> Option<SocketHandoverState> {
@@ -682,9 +696,9 @@ impl DcSctpSocket for Socket {
 
         if let State::Established(tcb) = &self.state {
             handover_state.socket_state = HandoverSocketState::Connected;
-            self.send_queue.add_to_handover_state(&mut handover_state);
+            self.ctx.send_queue.add_to_handover_state(&mut handover_state);
             tcb.add_to_handover_state(&mut handover_state);
-            self.events.borrow_mut().add(SocketEvent::OnClosed());
+            self.ctx.events.borrow_mut().add(SocketEvent::OnClosed());
             self.state = State::Closed;
         }
         Some(handover_state)

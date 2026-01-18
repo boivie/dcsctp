@@ -23,8 +23,8 @@ mod tests {
     use crate::packet::cookie_echo_chunk::CookieEchoChunk;
     use crate::packet::sctp_packet::SctpPacket;
     use crate::packet::sctp_packet::SctpPacketBuilder;
-    use crate::socket::state_cookie::StateCookie;
     use crate::socket::Socket;
+    use crate::socket::state_cookie::StateCookie;
     use crate::testing::event_helpers::expect_no_event;
     use crate::testing::event_helpers::expect_on_connected;
     use crate::testing::event_helpers::expect_on_error;
@@ -72,7 +72,7 @@ mod tests {
         let event = socket_z.poll_event().unwrap();
         assert!(matches!(event, SocketEvent::OnConnectionRestarted()));
         expect_on_connected!(socket_z.poll_event());
-        
+
         // Z -> COOKIE_ACK -> A'
         let cookie_ack_packet = expect_sent_packet!(socket_z.poll_event());
         socket_a_prime.handle_input(&cookie_ack_packet);

@@ -4,19 +4,20 @@ use crate::api::SocketTime;
 use crate::packet::abort_chunk::AbortChunk;
 use crate::packet::chunk::Chunk;
 use crate::packet::error_causes::ErrorCause;
+use crate::packet::sctp_packet::CommonHeader;
+use crate::packet::sctp_packet::SctpPacketBuilder;
 use crate::packet::shutdown_ack_chunk::ShutdownAckChunk;
 use crate::packet::shutdown_chunk::ShutdownChunk;
 use crate::packet::shutdown_complete_chunk::ShutdownCompleteChunk;
-use crate::packet::sctp_packet::CommonHeader;
-use crate::packet::sctp_packet::SctpPacketBuilder;
 use crate::packet::user_initiated_abort_error_cause::UserInitiatedAbortErrorCause;
 use crate::socket::context::Context;
-use crate::socket::state::{ShutdownSentState, State};
-use crate::transition_between;
+use crate::socket::state::ShutdownSentState;
+use crate::socket::state::State;
 use crate::timer::BackoffAlgorithm;
 use crate::timer::Timer;
+use crate::transition_between;
 
-pub(crate) fn maybe_send_shutdown(state: &mut State, ctx: &mut Context<'_>, now: SocketTime) {
+pub(crate) fn maybe_send_shutdown(state: &mut State, ctx: &mut Context, now: SocketTime) {
     let State::ShutdownPending(tcb) = state else { unreachable!() };
     if tcb.retransmission_queue.unacked_bytes() != 0 {
         // Not ready to shutdown yet.
@@ -45,7 +46,7 @@ pub(crate) fn maybe_send_shutdown(state: &mut State, ctx: &mut Context<'_>, now:
     send_shutdown(state, ctx);
 }
 
-pub(crate) fn maybe_send_shutdown_ack(state: &mut State, ctx: &mut Context<'_>) {
+pub(crate) fn maybe_send_shutdown_ack(state: &mut State, ctx: &mut Context) {
     let State::ShutdownReceived(tcb) = state else { unreachable!() };
     if tcb.retransmission_queue.unacked_bytes() != 0 {
         // Not ready to shutdown yet.
@@ -65,10 +66,8 @@ pub(crate) fn maybe_send_shutdown_ack(state: &mut State, ctx: &mut Context<'_>) 
     send_shutdown_ack(state, ctx);
 }
 
-pub(crate) fn send_shutdown(state: &mut State, ctx: &mut Context<'_>) {
-    let State::ShutdownSent(ShutdownSentState { tcb, .. }) = state else {
-        unreachable!()
-    };
+pub(crate) fn send_shutdown(state: &mut State, ctx: &mut Context) {
+    let State::ShutdownSent(ShutdownSentState { tcb, .. }) = state else { unreachable!() };
     ctx.events.borrow_mut().add(SocketEvent::SendPacket(
         tcb.new_packet()
             .add(&Chunk::Shutdown(ShutdownChunk {
@@ -79,7 +78,7 @@ pub(crate) fn send_shutdown(state: &mut State, ctx: &mut Context<'_>) {
     ctx.metrics.tx_packets_count += 1;
 }
 
-pub(crate) fn send_shutdown_ack(state: &mut State, ctx: &mut Context<'_>) {
+pub(crate) fn send_shutdown_ack(state: &mut State, ctx: &mut Context) {
     let State::ShutdownAckSent(tcb) = state else { unreachable!() };
     ctx.events.borrow_mut().add(SocketEvent::SendPacket(
         tcb.new_packet().add(&Chunk::ShutdownAck(ShutdownAckChunk {})).build(),
@@ -87,7 +86,7 @@ pub(crate) fn send_shutdown_ack(state: &mut State, ctx: &mut Context<'_>) {
     ctx.metrics.tx_packets_count += 1;
 }
 
-pub(crate) fn handle_shutdown(state: &mut State, ctx: &mut Context<'_>) {
+pub(crate) fn handle_shutdown(state: &mut State, ctx: &mut Context) {
     match state {
         State::Closed
         | State::ShutdownReceived(_)
@@ -130,7 +129,7 @@ pub(crate) fn handle_shutdown(state: &mut State, ctx: &mut Context<'_>) {
     }
 }
 
-pub(crate) fn handle_shutdown_ack(state: &mut State, ctx: &mut Context<'_>, header: &CommonHeader) {
+pub(crate) fn handle_shutdown_ack(state: &mut State, ctx: &mut Context, header: &CommonHeader) {
     match state {
         State::ShutdownSent(ShutdownSentState { tcb, .. }) | State::ShutdownAckSent(tcb) => {
             // From <https://datatracker.ietf.org/doc/html/rfc9260#section-9.2-14>:
@@ -146,9 +145,7 @@ pub(crate) fn handle_shutdown_ack(state: &mut State, ctx: &mut Context<'_>, head
             //   and remove all record of the association.
             ctx.events.borrow_mut().add(SocketEvent::SendPacket(
                 tcb.new_packet()
-                    .add(&Chunk::ShutdownComplete(ShutdownCompleteChunk {
-                        tag_reflected: false,
-                    }))
+                    .add(&Chunk::ShutdownComplete(ShutdownCompleteChunk { tag_reflected: false }))
                     .build(),
             ));
             ctx.metrics.tx_packets_count += 1;
@@ -184,7 +181,11 @@ pub(crate) fn handle_shutdown_ack(state: &mut State, ctx: &mut Context<'_>, head
     }
 }
 
-pub(crate) fn handle_shutdown_complete(state: &mut State, ctx: &mut Context<'_>, _chunk: ShutdownCompleteChunk) {
+pub(crate) fn handle_shutdown_complete(
+    state: &mut State,
+    ctx: &mut Context,
+    _chunk: ShutdownCompleteChunk,
+) {
     if let State::ShutdownAckSent(_) = state {
         // From <https://datatracker.ietf.org/doc/html/rfc9260#section-9.2-15>:
         //
@@ -197,7 +198,12 @@ pub(crate) fn handle_shutdown_complete(state: &mut State, ctx: &mut Context<'_>,
     }
 }
 
-pub(crate) fn maybe_send_shutdown_on_packet_received(state: &mut State, ctx: &mut Context<'_>, now: SocketTime, chunks: &[Chunk]) {
+pub(crate) fn maybe_send_shutdown_on_packet_received(
+    state: &mut State,
+    ctx: &mut Context,
+    now: SocketTime,
+    chunks: &[Chunk],
+) {
     if let State::ShutdownSent(s) = state {
         if chunks.iter().any(|c| matches!(c, Chunk::Data(_))) {
             // From <https://datatracker.ietf.org/doc/html/rfc9260#section-9.2-10>:
@@ -212,7 +218,7 @@ pub(crate) fn maybe_send_shutdown_on_packet_received(state: &mut State, ctx: &mu
     }
 }
 
-pub(crate) fn handle_t2_shutdown_timeout(state: &mut State, ctx: &mut Context<'_>, now: SocketTime) {
+pub(crate) fn handle_t2_shutdown_timeout(state: &mut State, ctx: &mut Context, now: SocketTime) {
     let State::ShutdownSent(s) = state else {
         return;
     };
@@ -227,9 +233,7 @@ pub(crate) fn handle_t2_shutdown_timeout(state: &mut State, ctx: &mut Context<'_
                 .new_packet()
                 .add(&Chunk::Abort(AbortChunk {
                     error_causes: vec![ErrorCause::UserInitiatedAbort(
-                        UserInitiatedAbortErrorCause {
-                            reason: "Too many retransmissions".into(),
-                        },
+                        UserInitiatedAbortErrorCause { reason: "Too many retransmissions".into() },
                     )],
                 }))
                 .build(),

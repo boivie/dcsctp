@@ -1,35 +1,35 @@
 use crate::EventSink;
+use crate::api::ErrorKind;
 use crate::api::Options;
 use crate::api::SctpImplementation;
 use crate::api::SocketEvent;
 use crate::api::SocketTime;
 use crate::packet::chunk::Chunk;
 use crate::packet::sctp_packet::SctpPacketBuilder;
-use crate::socket::state::State;
 use crate::socket::metrics::SocketMetrics;
+use crate::socket::state::State;
 use crate::socket::transmission_control_block::CurrentResetRequest;
 use crate::timer::Timer;
 use crate::tx::send_queue::SendQueue;
-use std::cmp::min;
-use std::time::Duration;
-use crate::api::ErrorKind;
-use std::rc::Rc;
 use std::cell::RefCell;
+use std::cmp::min;
+use std::rc::Rc;
+use std::time::Duration;
 
-pub(crate) struct Context<'a> {
-    pub options: &'a Options,
-    pub events: &'a Rc<RefCell<dyn EventSink>>,
-    pub send_queue: &'a mut SendQueue,
-    pub limit_forward_tsn_until: &'a mut SocketTime,
-    pub heartbeat_interval: &'a mut Timer,
-    pub heartbeat_timeout: &'a mut Timer,
-    pub heartbeat_counter: &'a mut u32,
-    pub heartbeat_sent_time: &'a mut SocketTime,
-    pub metrics: &'a mut SocketMetrics,
-    pub peer_implementation: &'a mut SctpImplementation,
+pub(crate) struct Context {
+    pub options: Options,
+    pub events: Rc<RefCell<dyn EventSink>>,
+    pub send_queue: SendQueue,
+    pub limit_forward_tsn_until: SocketTime,
+    pub heartbeat_interval: Timer,
+    pub heartbeat_timeout: Timer,
+    pub heartbeat_counter: u32,
+    pub heartbeat_sent_time: SocketTime,
+    pub metrics: SocketMetrics,
+    pub peer_implementation: SctpImplementation,
 }
 
-impl<'a> Context<'a> {
+impl Context {
     pub(crate) fn send_buffered_packets(&mut self, state: &mut State, now: SocketTime) {
         if let Some(tcb) = state.tcb_mut() {
             let mut packet = tcb.new_packet();
@@ -50,12 +50,13 @@ impl<'a> Context<'a> {
             if let Some(tcb) = state.tcb_mut() {
                 if packet_idx == 0 {
                     if tcb.data_tracker.should_send_ack(now, true) {
-                        builder.add(&Chunk::Sack(
-                            tcb.data_tracker
-                                .create_selective_ack(tcb.reassembly_queue.remaining_bytes() as u32),
-                        ));
+                        builder.add(
+                            &Chunk::Sack(tcb.data_tracker.create_selective_ack(
+                                tcb.reassembly_queue.remaining_bytes() as u32,
+                            )),
+                        );
                     }
-                    if now >= *self.limit_forward_tsn_until
+                    if now >= self.limit_forward_tsn_until
                         && tcb.retransmission_queue.should_send_forward_tsn(now)
                     {
                         builder.add(&tcb.retransmission_queue.create_forward_tsn());
@@ -66,7 +67,7 @@ impl<'a> Context<'a> {
                         //   before sending a duplicate FORWARD TSN. [...] Any delay applied to the
                         //   sending of FORWARD TSN chunk SHOULD NOT exceed 200ms and MUST NOT
                         //   exceed 500ms.
-                        *self.limit_forward_tsn_until =
+                        self.limit_forward_tsn_until =
                             now + min(Duration::from_millis(200), tcb.rto.srtt());
                     }
 

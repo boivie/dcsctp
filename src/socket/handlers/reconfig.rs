@@ -1,9 +1,9 @@
-use crate::packet::parameter::Parameter;
 use crate::api::SocketEvent;
 use crate::api::SocketTime;
 use crate::packet::chunk::Chunk;
 use crate::packet::incoming_ssn_reset_request_parameter::IncomingSsnResetRequestParameter;
 use crate::packet::outgoing_ssn_reset_request_parameter::OutgoingSsnResetRequestParameter;
+use crate::packet::parameter::Parameter;
 use crate::packet::re_config_chunk::ReConfigChunk;
 use crate::packet::reconfiguration_response_parameter::ReconfigurationResponseParameter;
 use crate::packet::reconfiguration_response_parameter::ReconfigurationResponseResult;
@@ -12,7 +12,12 @@ use crate::socket::state::State;
 use crate::socket::transmission_control_block::CurrentResetRequest;
 use crate::socket::transmission_control_block::InflightResetRequest;
 
-pub(crate) fn handle_reconfig(state: &mut State, ctx: &mut Context<'_>, now: SocketTime, chunk: ReConfigChunk) {
+pub(crate) fn handle_reconfig(
+    state: &mut State,
+    ctx: &mut Context,
+    now: SocketTime,
+    chunk: ReConfigChunk,
+) {
     let Some(tcb) = state.tcb_mut() else {
         return;
     };
@@ -59,9 +64,7 @@ pub(crate) fn handle_reconfig(state: &mut State, ctx: &mut Context<'_>, now: Soc
                         //   E4: Any queued TSNs (queued at step E2) MUST now be released and
                         //   processed normally."
                         tcb.reassembly_queue.reset_streams_and_leave_deferred_reset(&streams);
-                        ctx.events
-                            .borrow_mut()
-                            .add(SocketEvent::OnIncomingStreamReset(streams));
+                        ctx.events.borrow_mut().add(SocketEvent::OnIncomingStreamReset(streams));
                         ReconfigurationResponseResult::SuccessPerformed
                     };
                     responses.push(Parameter::ReconfigurationResponse(
@@ -111,11 +114,9 @@ pub(crate) fn handle_reconfig(state: &mut State, ctx: &mut Context<'_>, now: Soc
                         tcb.current_reset_request = match result {
                             ReconfigurationResponseResult::SuccessNothingToDo
                             | ReconfigurationResponseResult::SuccessPerformed => {
-                                ctx.events.borrow_mut().add(
-                                    SocketEvent::OnStreamsResetPerformed(
-                                        request.streams.clone(),
-                                    ),
-                                );
+                                ctx.events.borrow_mut().add(SocketEvent::OnStreamsResetPerformed(
+                                    request.streams.clone(),
+                                ));
                                 ctx.send_queue.commit_reset_streams();
 
                                 CurrentResetRequest::None
@@ -130,9 +131,9 @@ pub(crate) fn handle_reconfig(state: &mut State, ctx: &mut Context<'_>, now: Soc
                             | ReconfigurationResponseResult::ErrorWrongSSN
                             | ReconfigurationResponseResult::ErrorRequestAlreadyInProgress
                             | ReconfigurationResponseResult::ErrorBadSequenceNumber => {
-                                ctx.events.borrow_mut().add(
-                                    SocketEvent::OnStreamsResetFailed(request.streams.clone()),
-                                );
+                                ctx.events.borrow_mut().add(SocketEvent::OnStreamsResetFailed(
+                                    request.streams.clone(),
+                                ));
                                 ctx.send_queue.rollback_reset_streams();
 
                                 CurrentResetRequest::None
@@ -147,9 +148,7 @@ pub(crate) fn handle_reconfig(state: &mut State, ctx: &mut Context<'_>, now: Soc
 
     if !responses.is_empty() {
         ctx.events.borrow_mut().add(SocketEvent::SendPacket(
-            tcb.new_packet()
-                .add(&Chunk::ReConfig(ReConfigChunk { parameters: responses }))
-                .build(),
+            tcb.new_packet().add(&Chunk::ReConfig(ReConfigChunk { parameters: responses })).build(),
         ));
         ctx.metrics.tx_packets_count += 1;
     }
@@ -161,7 +160,7 @@ pub(crate) fn handle_reconfig(state: &mut State, ctx: &mut Context<'_>, now: Soc
     ctx.send_buffered_packets(state, now);
 }
 
-pub(crate) fn handle_reconfig_timeout(state: &mut State, ctx: &mut Context<'_>, now: SocketTime) {
+pub(crate) fn handle_reconfig_timeout(state: &mut State, ctx: &mut Context, now: SocketTime) {
     let tcb = state.tcb_mut().unwrap();
     if tcb.reconfig_timer.expire(now) {
         match tcb.current_reset_request {

@@ -1,8 +1,8 @@
 use crate::api::ErrorKind;
-use crate::packet::parameter::Parameter;
 use crate::api::SocketEvent;
 use crate::api::SocketTime;
 use crate::api::ZERO_CHECKSUM_ALTERNATE_ERROR_DETECTION_METHOD_NONE;
+use crate::math::round_down_to_4;
 use crate::packet::abort_chunk::AbortChunk;
 use crate::packet::chunk::Chunk;
 use crate::packet::cookie_ack_chunk::CookieAckChunk;
@@ -12,36 +12,44 @@ use crate::packet::error_causes::ErrorCause;
 use crate::packet::error_chunk::ErrorChunk;
 use crate::packet::init_ack_chunk::InitAckChunk;
 use crate::packet::init_chunk::InitChunk;
+use crate::packet::parameter::Parameter;
 use crate::packet::protocol_violation_error_cause::ProtocolViolationErrorCause;
 use crate::packet::sctp_packet::CommonHeader;
 use crate::packet::sctp_packet::SctpPacketBuilder;
 use crate::packet::shutdown_ack_chunk::ShutdownAckChunk;
 use crate::packet::state_cookie_parameter::StateCookieParameter;
 use crate::socket::context::Context;
-use crate::socket::state::{CookieEchoState, CookieResolution, CookieWaitState, ShutdownSentState, State};
+use crate::socket::handlers::shutdown::send_shutdown_ack;
+use crate::socket::state::CookieEchoState;
+use crate::socket::state::CookieResolution;
+use crate::socket::state::CookieWaitState;
+use crate::socket::state::ShutdownSentState;
+use crate::socket::state::State;
 use crate::socket::state_cookie::StateCookie;
 use crate::socket::transmission_control_block::TransmissionControlBlock;
-use crate::socket::util::{compute_capabilities, detemine_sctp_implementation, make_capability_parameters};
-use crate::transition_between;
+use crate::socket::util::compute_capabilities;
+use crate::socket::util::detemine_sctp_implementation;
+use crate::socket::util::make_capability_parameters;
 use crate::timer::BackoffAlgorithm;
 use crate::timer::Timer;
+use crate::transition_between;
 use crate::types::Tsn;
-use crate::socket::handlers::shutdown::send_shutdown_ack;
 #[cfg(not(test))]
-use log::{info, warn};
+use log::info;
+#[cfg(not(test))]
+use log::warn;
+use rand::Rng;
 #[cfg(test)]
 use std::println as info;
 #[cfg(test)]
 use std::println as warn;
-use rand::Rng;
-use crate::math::round_down_to_4;
 
 pub(crate) const MIN_VERIFICATION_TAG: u32 = 1;
 pub(crate) const MAX_VERIFICATION_TAG: u32 = u32::MAX;
 pub(crate) const MIN_INITIAL_TSN: u32 = u32::MIN;
 pub(crate) const MAX_INITIAL_TSN: u32 = u32::MAX;
 
-pub(crate) fn handle_init(state: &mut State, ctx: &mut Context<'_>, chunk: InitChunk) {
+pub(crate) fn handle_init(state: &mut State, ctx: &mut Context, chunk: InitChunk) {
     let my_verification_tag: u32;
     let my_initial_tsn: Tsn;
     let tie_tag: u64;
@@ -98,13 +106,13 @@ pub(crate) fn handle_init(state: &mut State, ctx: &mut Context<'_>, chunk: InitC
     }
 
     let capabilities = compute_capabilities(
-        ctx.options,
+        &ctx.options,
         chunk.nbr_outbound_streams,
         chunk.nbr_inbound_streams,
         &chunk.parameters,
     );
     let write_checksum = !capabilities.zero_checksum;
-    let mut parameters = make_capability_parameters(ctx.options, capabilities.zero_checksum);
+    let mut parameters = make_capability_parameters(&ctx.options, capabilities.zero_checksum);
     parameters.push(Parameter::StateCookie(StateCookieParameter {
         cookie: StateCookie {
             peer_tag: chunk.initiate_tag,
@@ -140,7 +148,12 @@ pub(crate) fn handle_init(state: &mut State, ctx: &mut Context<'_>, chunk: InitC
     ctx.metrics.tx_packets_count += 1;
 }
 
-pub(crate) fn handle_init_ack(state: &mut State, ctx: &mut Context<'_>, now: SocketTime, chunk: InitAckChunk) {
+pub(crate) fn handle_init_ack(
+    state: &mut State,
+    ctx: &mut Context,
+    now: SocketTime,
+    chunk: InitAckChunk,
+) {
     let State::CookieWait(s) = state else {
         // From <https://datatracker.ietf.org/doc/html/rfc9260#section-5.2.3>:
         //
@@ -153,7 +166,7 @@ pub(crate) fn handle_init_ack(state: &mut State, ctx: &mut Context<'_>, now: Soc
     };
 
     let capabilities = compute_capabilities(
-        ctx.options,
+        &ctx.options,
         chunk.nbr_outbound_streams,
         chunk.nbr_inbound_streams,
         &chunk.parameters,
@@ -171,9 +184,9 @@ pub(crate) fn handle_init_ack(state: &mut State, ctx: &mut Context<'_>, now: Soc
                 round_down_to_4!(ctx.options.mtu),
             )
             .add(&Chunk::Abort(AbortChunk {
-                error_causes: vec![ErrorCause::ProtocolViolation(
-                    ProtocolViolationErrorCause { information: "INIT-ACK malformed".into() },
-                )],
+                error_causes: vec![ErrorCause::ProtocolViolation(ProtocolViolationErrorCause {
+                    information: "INIT-ACK malformed".into(),
+                })],
             }))
             .build(),
         ));
@@ -194,7 +207,7 @@ pub(crate) fn handle_init_ack(state: &mut State, ctx: &mut Context<'_>, now: Soc
         None,
     );
     t1_cookie.start(now);
-    *ctx.peer_implementation = detemine_sctp_implementation(&cookie);
+    ctx.peer_implementation = detemine_sctp_implementation(&cookie);
     ctx.send_queue.reset();
     let tie_tag = rand::rng().random::<u64>();
     *state = State::CookieEchoed(CookieEchoState {
@@ -203,7 +216,7 @@ pub(crate) fn handle_init_ack(state: &mut State, ctx: &mut Context<'_>, now: Soc
         initial_tsn: s.initial_tsn,
         verification_tag: s.verification_tag,
         tcb: TransmissionControlBlock::new(
-            ctx.options,
+            &ctx.options,
             s.verification_tag,
             s.initial_tsn,
             chunk.initiate_tag,
@@ -219,7 +232,7 @@ pub(crate) fn handle_init_ack(state: &mut State, ctx: &mut Context<'_>, now: Soc
     send_cookie_echo(state, ctx, now);
 }
 
-pub(crate) fn send_cookie_echo(state: &mut State, ctx: &mut Context<'_>, now: SocketTime) {
+pub(crate) fn send_cookie_echo(state: &mut State, ctx: &mut Context, now: SocketTime) {
     let &mut State::CookieEchoed(ref s) = state else {
         unreachable!();
     };
@@ -241,7 +254,7 @@ pub(crate) fn send_cookie_echo(state: &mut State, ctx: &mut Context<'_>, now: So
 
 pub(crate) fn handle_cookie_echo(
     state: &mut State,
-    ctx: &mut Context<'_>,
+    ctx: &mut Context,
     now: SocketTime,
     header: &CommonHeader,
     chunk: CookieEchoChunk,
@@ -336,7 +349,7 @@ pub(crate) fn handle_cookie_echo(
 /// If `reset_queue` is true, reset message identifiers (used for restarts).
 fn establish_new_tcb(
     state: &mut State,
-    ctx: &mut Context<'_>,
+    ctx: &mut Context,
     now: SocketTime,
     cookie: &StateCookie,
     reset_queue: bool,
@@ -349,7 +362,7 @@ fn establish_new_tcb(
 
     let tie_tag = rand::rng().random::<u64>();
     let new_tcb = TransmissionControlBlock::new(
-        ctx.options,
+        &ctx.options,
         cookie.my_tag,
         cookie.my_initial_tsn,
         cookie.peer_tag,
@@ -367,7 +380,7 @@ fn establish_new_tcb(
     ctx.events.borrow_mut().add(SocketEvent::OnConnected());
 }
 
-pub(crate) fn handle_cookie_ack(state: &mut State, ctx: &mut Context<'_>, now: SocketTime) {
+pub(crate) fn handle_cookie_ack(state: &mut State, ctx: &mut Context, now: SocketTime) {
     if !matches!(state, State::CookieEchoed(_)) {
         // From <https://datatracker.ietf.org/doc/html/rfc9260#section-5.2.5>:
         //
@@ -386,33 +399,28 @@ pub(crate) fn handle_cookie_ack(state: &mut State, ctx: &mut Context<'_>, now: S
     ctx.events.borrow_mut().add(SocketEvent::OnConnected());
 }
 
-pub(crate) fn send_init(state: &mut State, ctx: &mut Context<'_>) {
+pub(crate) fn send_init(state: &mut State, ctx: &mut Context) {
     let &mut State::CookieWait(ref s) = state else {
         unreachable!();
     };
     let support_zero_checksum = ctx.options.zero_checksum_alternate_error_detection_method
         != ZERO_CHECKSUM_ALTERNATE_ERROR_DETECTION_METHOD_NONE;
     ctx.events.borrow_mut().add(SocketEvent::SendPacket(
-        SctpPacketBuilder::new(
-            0,
-            ctx.options.local_port,
-            ctx.options.remote_port,
-            ctx.options.mtu,
-        )
-        .add(&Chunk::Init(InitChunk {
-            initiate_tag: s.verification_tag,
-            a_rwnd: ctx.options.max_receiver_window_buffer_size as u32,
-            nbr_outbound_streams: ctx.options.announced_maximum_outgoing_streams,
-            nbr_inbound_streams: ctx.options.announced_maximum_incoming_streams,
-            initial_tsn: s.initial_tsn,
-            parameters: make_capability_parameters(ctx.options, support_zero_checksum),
-        }))
-        .build(),
+        SctpPacketBuilder::new(0, ctx.options.local_port, ctx.options.remote_port, ctx.options.mtu)
+            .add(&Chunk::Init(InitChunk {
+                initiate_tag: s.verification_tag,
+                a_rwnd: ctx.options.max_receiver_window_buffer_size as u32,
+                nbr_outbound_streams: ctx.options.announced_maximum_outgoing_streams,
+                nbr_inbound_streams: ctx.options.announced_maximum_incoming_streams,
+                initial_tsn: s.initial_tsn,
+                parameters: make_capability_parameters(&ctx.options, support_zero_checksum),
+            }))
+            .build(),
     ));
     ctx.metrics.tx_packets_count += 1;
 }
 
-pub(crate) fn handle_t1init_timeout(state: &mut State, ctx: &mut Context<'_>, now: SocketTime) {
+pub(crate) fn handle_t1init_timeout(state: &mut State, ctx: &mut Context, now: SocketTime) {
     let &mut State::CookieWait(ref mut s) = state else { unreachable!() };
     if s.t1_init.expire(now) {
         if s.t1_init.is_running() {
@@ -423,7 +431,7 @@ pub(crate) fn handle_t1init_timeout(state: &mut State, ctx: &mut Context<'_>, no
     }
 }
 
-pub(crate) fn handle_t1cookie_timeout(state: &mut State, ctx: &mut Context<'_>, now: SocketTime) {
+pub(crate) fn handle_t1cookie_timeout(state: &mut State, ctx: &mut Context, now: SocketTime) {
     let &mut State::CookieEchoed(ref mut s) = state else { unreachable!() };
     if s.t1_cookie.expire(now) {
         if !s.t1_cookie.is_running() {

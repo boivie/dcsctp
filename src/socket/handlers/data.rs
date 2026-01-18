@@ -1,27 +1,33 @@
 use crate::api::ErrorKind;
 use crate::api::SocketEvent;
 use crate::api::SocketTime;
+use crate::packet::SkippedStream;
 use crate::packet::chunk::Chunk;
-use crate::packet::data::Data;
 use crate::packet::chunk_validators::clean_sack;
+use crate::packet::data::Data;
 use crate::packet::error_causes::ErrorCause;
 use crate::packet::error_chunk::ErrorChunk;
+use crate::packet::iforward_tsn_chunk::IForwardTsnChunk;
 use crate::packet::no_user_data_error_cause::NoUserDataErrorCause;
 use crate::packet::sack_chunk::SackChunk;
 use crate::socket::context::Context;
+use crate::socket::handlers::shutdown::maybe_send_shutdown;
+use crate::socket::handlers::shutdown::maybe_send_shutdown_ack;
 use crate::socket::state::State;
 use crate::tx::retransmission_queue::HandleSackResult;
 use crate::types::Tsn;
-use crate::packet::SkippedStream;
-use crate::packet::iforward_tsn_chunk::IForwardTsnChunk;
-use crate::socket::handlers::shutdown::{maybe_send_shutdown, maybe_send_shutdown_ack};
-
 #[cfg(not(test))]
 use log::debug;
 #[cfg(test)]
 use std::println as debug;
 
-pub(crate) fn handle_data(state: &mut State, ctx: &mut Context<'_>, now: SocketTime, tsn: Tsn, data: Data) {
+pub(crate) fn handle_data(
+    state: &mut State,
+    ctx: &mut Context,
+    now: SocketTime,
+    tsn: Tsn,
+    data: Data,
+) {
     if data.payload.is_empty() {
         ctx.events.borrow_mut().add(SocketEvent::OnError(
             ErrorKind::ProtocolViolation,
@@ -31,9 +37,7 @@ pub(crate) fn handle_data(state: &mut State, ctx: &mut Context<'_>, now: SocketT
             ctx.events.borrow_mut().add(SocketEvent::SendPacket(
                 tcb.new_packet()
                     .add(&Chunk::Error(ErrorChunk {
-                        error_causes: vec![ErrorCause::NoUserData(NoUserDataErrorCause {
-                            tsn,
-                        })],
+                        error_causes: vec![ErrorCause::NoUserData(NoUserDataErrorCause { tsn })],
                     }))
                     .build(),
             ));
@@ -67,11 +71,9 @@ pub(crate) fn handle_data(state: &mut State, ctx: &mut Context<'_>, now: SocketT
     }
 }
 
-pub(crate) fn handle_sack(state: &mut State, ctx: &mut Context<'_>, now: SocketTime, sack: SackChunk) {
+pub(crate) fn handle_sack(state: &mut State, ctx: &mut Context, now: SocketTime, sack: SackChunk) {
     let Some(tcb) = state.tcb_mut() else {
-        ctx.events
-            .borrow_mut()
-            .add(SocketEvent::OnError(ErrorKind::NotConnected, "No TCB".into()));
+        ctx.events.borrow_mut().add(SocketEvent::OnError(ErrorKind::NotConnected, "No TCB".into()));
         return;
     };
 
@@ -115,7 +117,7 @@ pub(crate) fn handle_sack(state: &mut State, ctx: &mut Context<'_>, now: SocketT
     ctx.send_buffered_packets(state, now);
 }
 
-pub(crate) fn maybe_send_fast_retransmit(state: &mut State, ctx: &mut Context<'_>, now: SocketTime) {
+pub(crate) fn maybe_send_fast_retransmit(state: &mut State, ctx: &mut Context, now: SocketTime) {
     let tcb = state.tcb_mut().unwrap();
     if !tcb.retransmission_queue.has_data_to_be_fast_retransmitted() {
         return;
@@ -136,7 +138,7 @@ pub(crate) fn maybe_send_fast_retransmit(state: &mut State, ctx: &mut Context<'_
 
 pub(crate) fn handle_forward_tsn(
     state: &mut State,
-    _ctx: &mut Context<'_>, // Unused
+    _ctx: &mut Context, // Unused
     now: SocketTime,
     new_cumulative_tsn: Tsn,
     skipped_streams: Vec<SkippedStream>,
@@ -148,9 +150,15 @@ pub(crate) fn handle_forward_tsn(
     }
 }
 
-pub(crate) fn handle_iforward_tsn(_state: &mut State, _ctx: &mut Context<'_>, _now: SocketTime, _chunk: IForwardTsnChunk) {}
+pub(crate) fn handle_iforward_tsn(
+    _state: &mut State,
+    _ctx: &mut Context,
+    _now: SocketTime,
+    _chunk: IForwardTsnChunk,
+) {
+}
 
-pub(crate) fn maybe_send_sack(state: &mut State, ctx: &mut Context<'_>, now: SocketTime) {
+pub(crate) fn maybe_send_sack(state: &mut State, ctx: &mut Context, now: SocketTime) {
     if let Some(tcb) = state.tcb_mut() {
         tcb.data_tracker.observe_packet_end(now);
         if tcb.data_tracker.should_send_ack(now, false) {

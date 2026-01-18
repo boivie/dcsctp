@@ -1,26 +1,26 @@
+use crate::EventSink;
 use crate::api::Options;
-use crate::packet::parameter::Parameter;
 use crate::api::SctpImplementation;
 use crate::api::SocketEvent;
 use crate::api::SocketTime;
-use crate::EventSink;
+use crate::api::ZERO_CHECKSUM_ALTERNATE_ERROR_DETECTION_METHOD_NONE;
+use crate::logging::log_packet;
 use crate::packet::forward_tsn_chunk;
 use crate::packet::forward_tsn_supported_parameter::ForwardTsnSupportedParameter;
 use crate::packet::idata_chunk;
 use crate::packet::iforward_tsn_chunk;
+use crate::packet::parameter::Parameter;
 use crate::packet::re_config_chunk;
 use crate::packet::supported_extensions_parameter::SupportedExtensionsParameter;
 use crate::packet::zero_checksum_acceptable_parameter::ZeroChecksumAcceptableParameter;
 use crate::socket::capabilities::Capabilities;
-use crate::logging::log_packet;
-use crate::api::ZERO_CHECKSUM_ALTERNATE_ERROR_DETECTION_METHOD_NONE;
 #[cfg(not(test))]
 use log::info;
-#[cfg(test)]
-use std::println as info;
 use std::cell::RefCell;
 use std::cmp::min;
 use std::collections::HashSet;
+#[cfg(test)]
+use std::println as info;
 use std::rc::Rc;
 
 pub(crate) struct TxErrorCounter {
@@ -30,10 +30,7 @@ pub(crate) struct TxErrorCounter {
 
 impl TxErrorCounter {
     pub(crate) fn new(limit: Option<u32>) -> Self {
-        Self {
-            error_counter: 0,
-            limit,
-        }
+        Self { error_counter: 0, limit }
     }
 
     pub(crate) fn increment(&mut self) {
@@ -50,11 +47,7 @@ impl TxErrorCounter {
     }
 
     pub(crate) fn is_exhausted(&self) -> bool {
-        if let Some(limit) = self.limit {
-            self.error_counter > limit
-        } else {
-            false
-        }
+        if let Some(limit) = self.limit { self.error_counter > limit } else { false }
     }
 }
 
@@ -148,7 +141,10 @@ pub(crate) fn detemine_sctp_implementation(cookie: &[u8]) -> SctpImplementation 
     SctpImplementation::Unknown
 }
 
-pub(crate) fn make_capability_parameters(options: &Options, support_zero_checksum: bool) -> Vec<Parameter> {
+pub(crate) fn make_capability_parameters(
+    options: &Options,
+    support_zero_checksum: bool,
+) -> Vec<Parameter> {
     let mut result: Vec<Parameter> = Vec::new();
     let mut chunk_types: Vec<u8> = Vec::new();
     chunk_types.push(re_config_chunk::CHUNK_TYPE);
