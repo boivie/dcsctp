@@ -1,0 +1,137 @@
+use crate::EventSink;
+use crate::api::Options;
+use crate::api::SctpImplementation;
+use crate::api::SocketEvent;
+use crate::api::SocketTime;
+use crate::packet::chunk::Chunk;
+use crate::packet::sctp_packet::SctpPacketBuilder;
+use crate::socket::state::State;
+use crate::socket::transmission_control_block::CurrentResetRequest;
+use crate::socket::util::TxErrorCounter;
+use crate::timer::Timer;
+use crate::tx::send_queue::SendQueue;
+use std::cmp::min;
+use std::time::Duration;
+use crate::api::ErrorKind;
+use std::rc::Rc;
+use std::cell::RefCell;
+
+pub(crate) struct Context<'a, 'sq> {
+    pub options: &'a Options,
+    pub events: &'a Rc<RefCell<dyn EventSink>>,
+    pub send_queue: &'a mut SendQueue<'sq>,
+    pub limit_forward_tsn_until: &'a mut SocketTime,
+    pub heartbeat_interval: &'a mut Timer,
+    pub heartbeat_timeout: &'a mut Timer,
+    pub heartbeat_counter: &'a mut u32,
+    pub heartbeat_sent_time: &'a mut SocketTime,
+    pub rx_packets_count: &'a mut usize,
+    pub tx_packets_count: &'a mut usize,
+    pub tx_messages_count: &'a mut usize,
+    pub peer_implementation: &'a mut SctpImplementation,
+    pub tx_error_counter: &'a mut TxErrorCounter,
+}
+
+impl<'a, 'sq> Context<'a, 'sq> {
+    pub(crate) fn send_buffered_packets(&mut self, state: &mut State, now: SocketTime) {
+        if let Some(tcb) = state.tcb_mut() {
+            let mut packet = tcb.new_packet();
+            self.send_buffered_packets_with(state, now, &mut packet);
+        }
+    }
+
+    /// Given a builder that is either empty, or only contains control chunks, add more control
+    /// chunks and data chunks to it, and send it and possibly more packets, as is allowed by the
+    /// congestion window.
+    pub(crate) fn send_buffered_packets_with(
+        &mut self,
+        state: &mut State,
+        now: SocketTime,
+        builder: &mut SctpPacketBuilder,
+    ) {
+        for packet_idx in 0..self.options.max_burst {
+            if let Some(tcb) = state.tcb_mut() {
+                if packet_idx == 0 {
+                    if tcb.data_tracker.should_send_ack(now, true) {
+                        builder.add(&Chunk::Sack(
+                            tcb.data_tracker
+                                .create_selective_ack(tcb.reassembly_queue.remaining_bytes() as u32),
+                        ));
+                    }
+                    if now >= *self.limit_forward_tsn_until
+                        && tcb.retransmission_queue.should_send_forward_tsn(now)
+                    {
+                        builder.add(&tcb.retransmission_queue.create_forward_tsn());
+                        // From <https://datatracker.ietf.org/doc/html/rfc3758#section-3.5>:
+                        //
+                        //   IMPLEMENTATION NOTE: An implementation may wish to limit the number of
+                        //   duplicate FORWARD TSN chunks it sends by [...] waiting a full RTT
+                        //   before sending a duplicate FORWARD TSN. [...] Any delay applied to the
+                        //   sending of FORWARD TSN chunk SHOULD NOT exceed 200ms and MUST NOT
+                        //   exceed 500ms.
+                        *self.limit_forward_tsn_until =
+                            now + min(Duration::from_millis(200), tcb.rto.srtt());
+                    }
+
+                    if matches!(tcb.current_reset_request, CurrentResetRequest::None)
+                        && self.send_queue.has_streams_ready_to_be_reset()
+                    {
+                        tcb.start_ssn_reset_request(
+                            now,
+                            self.send_queue.get_streams_ready_to_reset(),
+                            builder,
+                        );
+                    }
+                }
+                let chunks = tcb.retransmission_queue.get_chunks_to_send(
+                    now,
+                    builder.bytes_remaining(),
+                    |max_size, discard| {
+                        for (stream_id, message_id) in discard {
+                            self.send_queue.discard(*stream_id, *message_id);
+                        }
+                        self.send_queue.produce(now, max_size)
+                    },
+                );
+
+                if !chunks.is_empty() {
+                    // Sending data means that the path is not idle - restart heartbeat timer.
+                    self.heartbeat_interval.start(now);
+                }
+
+                for (tsn, data) in chunks {
+                    builder.add(&tcb.make_data_chunk(tsn, data));
+                }
+            }
+
+            if builder.is_empty() {
+                break;
+            }
+            self.events.borrow_mut().add(SocketEvent::SendPacket(builder.build()));
+            *self.tx_packets_count += 1;
+
+            // From <https://datatracker.ietf.org/doc/html/rfc9260#section-5.1-2.3.2>:
+            //
+            //   [...] until the COOKIE ACK chunk is returned, the sender MUST NOT send any other
+            //   packets to the peer.
+            //
+            // Let the cookie echo timeout drive sending that chunk and any data
+            if matches!(state, State::CookieEchoed(_)) {
+                return;
+            }
+        }
+    }
+
+    pub(crate) fn internal_close(&mut self, state: &mut State, error: ErrorKind, message: String) {
+        if !matches!(state, State::Closed) {
+            self.heartbeat_interval.stop();
+            self.heartbeat_timeout.stop();
+            if error == ErrorKind::NoError {
+                self.events.borrow_mut().add(SocketEvent::OnClosed());
+            } else {
+                self.events.borrow_mut().add(SocketEvent::OnAborted(error, message));
+            }
+            *state = State::Closed;
+        }
+    }
+}
