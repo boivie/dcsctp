@@ -8,6 +8,10 @@ and this project adheres to
 
 ## Unreleased
 
+### Changed
+
+ - Optimized performance of message reassembly.
+
 ## 0.1.8 - 2026-02-06
 
 ### Changed
