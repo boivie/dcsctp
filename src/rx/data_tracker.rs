@@ -354,10 +354,12 @@ impl DataTracker {
         self.update_ack_state(now, AckState::Immediate);
     }
 
-    pub fn handle_timeout(&mut self, now: SocketTime) {
-        if self.delayed_ack_timer.expire(now) {
-            self.update_ack_state(now, AckState::Immediate);
+    pub fn handle_timeout(&mut self, now: SocketTime) -> bool {
+        if !self.delayed_ack_timer.expire(now) {
+            return false;
         }
+        self.update_ack_state(now, AckState::Immediate);
+        true
     }
 
     /// Called at the end of processing an SCTP packet.

@@ -606,6 +606,10 @@ impl RetransmissionQueue {
         to_be_sent
     }
 
+    pub fn can_send_data(&self) -> bool {
+        self.outstanding_data.has_data_to_be_retransmitted()
+    }
+
     fn chunk_max_retransmissions(&self, chunk: &DataToSend) -> u16 {
         if self.partial_reliability { chunk.max_retransmissions } else { u16::MAX }
     }
