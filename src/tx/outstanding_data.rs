@@ -399,7 +399,10 @@ impl OutstandingData {
         for block in gap_ack_blocks {
             let cur_block_first_acked = cumulative_tsn_ack.add_to(block.start as u32);
             let mut tsn = prev_block_last_acked + 1;
-            while tsn < cur_block_first_acked && tsn <= max_tsn_to_nack {
+            if tsn <= self.last_cumulative_tsn_ack {
+                tsn = self.last_cumulative_tsn_ack + 1;
+            }
+            while tsn < cur_block_first_acked && tsn <= max_tsn_to_nack && tsn < self.next_tsn() {
                 ack_info.has_packet_loss |= self.nack_chunk(tsn, false, !is_in_fast_recovery);
                 tsn += 1;
             }
@@ -1947,5 +1950,44 @@ mod tests {
         // There are no chunks marked for retransmissions.
         assert!(buf.get_chunks_to_be_fast_retransmitted(now(), 1000).is_empty());
         assert!(buf.get_chunks_to_be_retransmitted(now(), 1000).is_empty());
+    }
+
+    #[test]
+    fn test_gap_ack_block_beyond_highest_outstanding() {
+        let mut buf = OutstandingData::new(DATA_CHUNK_HEADER_SIZE, Tsn(9));
+        let mut seq = DataSequencer::new(StreamId(1));
+
+        // Insert TSN 10, 11, 12, 13
+        insert(&mut buf, seq.ordered("a", "B"));
+        insert(&mut buf, seq.ordered("b", ""));
+        insert(&mut buf, seq.ordered("c", ""));
+        insert(&mut buf, seq.ordered("d", "E"));
+
+        // Ack TSN 11, 15 (which is not sent yet, so malformed).
+        let gab = vec![GapAckBlock::new(4, 4)];
+        buf.handle_sack(Tsn(11), &gab, true);
+    }
+
+    #[test]
+    fn test_old_sack_with_gap_blocks() {
+        let mut buf = OutstandingData::new(DATA_CHUNK_HEADER_SIZE, Tsn(9));
+        let mut seq = DataSequencer::new(StreamId(1));
+
+        // Insert TSN 10, 11, 12, 13.
+        insert(&mut buf, seq.ordered("a", "B"));
+        insert(&mut buf, seq.ordered("b", ""));
+        insert(&mut buf, seq.ordered("c", ""));
+        insert(&mut buf, seq.ordered("d", "E"));
+
+        // Ack everything up to TSN 13.
+        buf.handle_sack(Tsn(13), &[], false);
+
+        // Insert TSN 14, 15.
+        insert(&mut buf, seq.ordered("e", "B"));
+        insert(&mut buf, seq.ordered("f", "E"));
+
+        // Assume a valid (but old) SACK is received, acking TSN 5, 15.
+        let gab = vec![GapAckBlock::new(10, 10)];
+        buf.handle_sack(Tsn(5), &gab, false);
     }
 }
