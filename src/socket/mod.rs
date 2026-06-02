@@ -262,7 +262,125 @@ impl Socket {
     }
 
     pub fn verification_tag(&self) -> u32 {
-        self.state.tcb().map_or(0, |tcb| tcb.my_verification_tag)
+        match &self.state {
+            State::Closed => 0,
+            State::CookieWait(s) => s.verification_tag,
+            State::CookieEchoed(s) => s.verification_tag,
+            State::Established(tcb)
+            | State::ShutdownPending(tcb)
+            | State::ShutdownSent(ShutdownState { tcb, .. })
+            | State::ShutdownReceived(tcb)
+            | State::ShutdownAckSent(ShutdownState { tcb, .. }) => tcb.my_verification_tag,
+        }
+    }
+
+    fn validate_packet(&self, packet: &SctpPacket) -> bool {
+        let header = &packet.common_header;
+        let my_verification_tag = self.verification_tag();
+
+        if !packet.chunks.is_empty() {
+            // ABORT (RFC 9260, Section 8.5.1, exception B).
+            if let Some(Chunk::Abort(abort)) =
+                packet.chunks.iter().find(|c| matches!(c, Chunk::Abort(_)))
+            {
+                let expected_tag = if abort.tag_reflected {
+                    self.state.tcb().map(|tcb| tcb.peer_verification_tag).unwrap_or(0)
+                } else {
+                    my_verification_tag
+                };
+                if header.verification_tag == expected_tag {
+                    return true;
+                }
+                self.ctx.events.borrow_mut().add(SocketEvent::OnError(
+                    ErrorKind::ParseFailed,
+                    "ABORT chunk verification tag was wrong".into(),
+                ));
+                return false;
+            }
+
+            // SHUTDOWN COMPLETE (RFC 9260, Section 8.5.1, exception C).
+            if let Some(Chunk::ShutdownComplete(complete)) =
+                packet.chunks.iter().find(|c| matches!(c, Chunk::ShutdownComplete(_)))
+            {
+                let expected_tag = if complete.tag_reflected {
+                    self.state.tcb().map(|tcb| tcb.peer_verification_tag).unwrap_or(0)
+                } else {
+                    my_verification_tag
+                };
+                if header.verification_tag == expected_tag {
+                    return true;
+                }
+                self.ctx.events.borrow_mut().add(SocketEvent::OnError(
+                    ErrorKind::ParseFailed,
+                    "SHUTDOWN_COMPLETE chunk verification tag was wrong".into(),
+                ));
+                return false;
+            }
+
+            // SHUTDOWN ACK (RFC 9260, Section 8.5.1, exception E).
+            if packet.chunks.iter().any(|c| matches!(c, Chunk::ShutdownAck(_))) {
+                if self.state.tcb().is_none() || matches!(self.state, State::CookieEchoed(_)) {
+                    return true;
+                }
+                if header.verification_tag == my_verification_tag {
+                    return true;
+                }
+                self.ctx.events.borrow_mut().add(SocketEvent::OnError(
+                    ErrorKind::ParseFailed,
+                    "SHUTDOWN_ACK chunk verification tag was wrong".into(),
+                ));
+                return false;
+            }
+
+            // 4. INIT ACK Chunk Exception
+            if packet
+                .chunks
+                .iter()
+                .any(|c| matches!(c, Chunk::InitAck(_)) || matches!(c, Chunk::CookieEcho(_)))
+            {
+                if matches!(packet.chunks[0], Chunk::CookieEcho(_)) {
+                    return true;
+                }
+                if header.verification_tag == my_verification_tag {
+                    return true;
+                }
+                self.ctx.events.borrow_mut().add(SocketEvent::OnError(
+                    ErrorKind::ParseFailed,
+                    format!(
+                        "Packet has invalid verification tag: {:08x}, expected {:08x}",
+                        header.verification_tag, my_verification_tag
+                    ),
+                ));
+                return false;
+            }
+        }
+
+        // INIT (RFC 9260, Section 8.5.1, exception A).
+        if header.verification_tag == 0 {
+            if packet.chunks.len() == 1 && matches!(packet.chunks[0], Chunk::Init(_)) {
+                return true;
+            }
+            self.ctx.events.borrow_mut().add(SocketEvent::OnError(
+                ErrorKind::ParseFailed,
+                "Only a single INIT chunk can be present in packets sent on verification_tag = 0"
+                    .into(),
+            ));
+            return false;
+        }
+
+        // Standard tag validation rule
+        if header.verification_tag == my_verification_tag {
+            return true;
+        }
+
+        self.ctx.events.borrow_mut().add(SocketEvent::OnError(
+            ErrorKind::ParseFailed,
+            format!(
+                "Packet has invalid verification tag: {:08x}, expected {:08x}",
+                header.verification_tag, my_verification_tag
+            ),
+        ));
+        false
     }
 
     fn handle_unrecognized_chunk(&mut self, chunk: UnknownChunk) -> bool {
@@ -332,6 +450,9 @@ impl DcSctpSocket for Socket {
                 ));
             }
             Ok(packet) => {
+                if !self.validate_packet(&packet) {
+                    return;
+                }
                 maybe_send_shutdown_on_packet_received(
                     &mut self.state,
                     &mut self.ctx,
@@ -457,6 +578,7 @@ impl DcSctpSocket for Socket {
                 self.ctx.events.borrow_mut().add(SocketEvent::SendPacket(
                     tcb.new_packet()
                         .add(&Chunk::Abort(AbortChunk {
+                            tag_reflected: false,
                             error_causes: vec![ErrorCause::UserInitiatedAbort(
                                 UserInitiatedAbortErrorCause {
                                     reason: "Too many retransmissions".into(),
@@ -527,6 +649,7 @@ impl DcSctpSocket for Socket {
                 self.ctx.events.borrow_mut().add(SocketEvent::SendPacket(
                     tcb.new_packet()
                         .add(&Chunk::Abort(AbortChunk {
+                            tag_reflected: false,
                             error_causes: vec![ErrorCause::UserInitiatedAbort(
                                 UserInitiatedAbortErrorCause { reason: "Close called".into() },
                             )],

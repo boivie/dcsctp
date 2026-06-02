@@ -263,6 +263,7 @@ pub(crate) fn handle_init_ack(
                 round_down_to_4!(ctx.options.mtu),
             )
             .add(&Chunk::Abort(AbortChunk {
+                tag_reflected: true,
                 error_causes: vec![ErrorCause::ProtocolViolation(ProtocolViolationErrorCause {
                     information: "INIT-ACK malformed".into(),
                 })],
