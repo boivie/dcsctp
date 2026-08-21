@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::api::handover::HandoverReadiness;
+pub use crate::api::handover::HandoverReadiness;
 use crate::api::handover::SocketHandoverState;
 use std::fmt;
 use std::num::NonZeroU64;
@@ -421,6 +421,9 @@ pub struct Options {
 
     /// Disables SCTP packet CRC-32 verification. Must only be used by tests.
     pub disable_checksum_verification: bool,
+
+    /// If true, allows handover even if there is outstanding data on the connection.
+    pub enable_handover_with_outstanding_data: bool,
 }
 
 impl Default for Options {
@@ -475,6 +478,7 @@ impl Default for Options {
             disable_checksum_verification: false,
             zero_checksum_alternate_error_detection_method:
                 ZERO_CHECKSUM_ALTERNATE_ERROR_DETECTION_METHOD_NONE,
+            enable_handover_with_outstanding_data: false,
         }
     }
 }
