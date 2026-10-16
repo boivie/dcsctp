@@ -20,6 +20,7 @@ and this project adheres to
  - Do not retransmit expired chunks.
  - Avoid retransmitting a lost chunk multiple times within a single RTT.
  - Only rate limit duplicate FORWARD-TSN chunks.
+ - Fast retransmit chunks reaching the miss indication threshold while in fast recovery.
 
 ## 0.1.15 - 2026-10-01
 
