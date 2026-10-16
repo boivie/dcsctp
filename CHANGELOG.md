@@ -19,6 +19,7 @@ and this project adheres to
  - Fix linter warnings from new compiler toolchain.
  - Do not retransmit expired chunks.
  - Avoid retransmitting a lost chunk multiple times within a single RTT.
+ - Only rate limit duplicate FORWARD-TSN chunks.
 
 ## 0.1.15 - 2026-10-01
 
